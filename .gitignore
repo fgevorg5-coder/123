@@ -5,4 +5,14 @@ instance/
 node_modules/
 *.log
 .hoplite/
-tests/load/results/
+.venv/
+# данные стенда и локальное состояние сервиса
+geoservice/.env
+geoservice/secret.key
+geoservice/users.db
+geoservice/cache/
+geoservice/uploads/
+geoservice/shp_leshoz/
+geoservice/maps_storage/
+geoservice/instance/
+geoservice/static/avatars/

@@ -311,12 +311,16 @@ DATABASE_URL = os.getenv("DATABASE_URL") or _SA_URL.create(
     port=int(DB_PORT or 5432), database=DB_NAME,
 )
 
+# [v20.13] Пул и threadpool согласованы: THREADPOOL_TOKENS (по умолчанию 64) потоков
+# могут одновременно просить соединение, поэтому pool_timeout=5 давал 500-е под
+# нагрузкой. Теперь ожидание 30 с (очередь, а не ошибка), размеры — из .env.
+# Сумма pool_size+max_overflow × число воркеров должна быть < max_connections PostgreSQL.
 engine = create_engine(
     DATABASE_URL,
     poolclass=QueuePool,
-    pool_size=10,
-    max_overflow=6,
-    pool_timeout=5,
+    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
+    pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "30")),
     pool_recycle=300,
     pool_pre_ping=True,
     echo=False,
@@ -324,6 +328,23 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+# [v20.13] Dependency — JSON-тело запроса. Позволяет писать обработчики с БД как
+# обычные def (FastAPI выполняет их в threadpool), не блокируя event loop
+# синхронными запросами к PostgreSQL/SQLite.
+async def _json_body(request: Request):
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON")
+
+
+async def _json_body_lenient(request: Request):
+    try:
+        return await request.json()
+    except Exception:
+        return {}
 
 
 # Dependency — получение сессии БД для каждого запроса
@@ -1116,7 +1137,7 @@ app = FastAPI(
 )
 
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
+def favicon():
     favicon_path = os.path.join(BASE_DIR, "favicon.ico")
     if os.path.exists(favicon_path):
         return FileResponse(favicon_path, media_type="image/x-icon")
@@ -1410,10 +1431,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 detail = qs[:300] if qs else ""
                 sc = response.status_code
                 # fire-and-forget, не ждём завершения
-                asyncio_module = __import__("asyncio")
-                asyncio_module.create_task(
-                    run_in_threadpool(_audit_write, ip, action, resource, sc, detail)
-                )
+                _spawn_bg(run_in_threadpool(_audit_write, ip, action, resource, sc, detail))
         except Exception:
             pass  # аудит никогда не должен ронять основной ответ
         return response
@@ -1548,7 +1566,8 @@ _http_session.mount('https://', _adapter)
 # 512 записей × ~50 КБ ≈ 25 МБ RAM — безопасно.
 # Ключ: (url_без_параметра_time, args_str)  →  (bytes, content_type)
 # ----------------------------------------------------------
-import functools, collections
+import functools, collections, contextlib
+import perf_kit as _pk  # [v20.13] TTL-кэш, single-flight, предохранители, троттлинг
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TILE CACHE — Redis-первый с LRU-fallback
@@ -1566,6 +1585,9 @@ import functools, collections
 #   REDIS_URL      = redis://127.0.0.1:6379/0   (опционально)
 #   REDIS_TILE_TTL = 86400                       (секунды, default 1 сутки)
 # ──────────────────────────────────────────────────────────────────────────────
+
+# [v20.13] Адрес внутреннего GeoServer — из .env (раньше был захардкожен в 5 местах).
+GEOSERVER_BASE_URL = os.getenv("GEOSERVER_BASE_URL", "http://192.168.12.109:9090/geoserver").rstrip("/")
 
 _REDIS_URL      = os.getenv("REDIS_URL", "")          # "" → Redis отключён
 _REDIS_TILE_TTL = int(os.getenv("REDIS_TILE_TTL", "86400"))
@@ -1602,25 +1624,52 @@ _tile_cache: collections.OrderedDict = collections.OrderedDict()
 _tile_cache_lock = threading.Lock()
 
 
+# [v20.13] Redis-вызовы больше не делаются из event loop: при зависшем Redis
+# (socket_timeout=1) каждый тайл раньше «замораживал» весь сервер на 1-2 с.
+# Чтение — через threadpool (_tile_cache_aget), запись — fire-and-forget в
+# отдельном маленьком пуле; после 3 ошибок подряд Redis отключается на 30 с.
+_redis_breaker = _pk.CircuitBreaker("redis", threshold=3, cooldown=30.0)
+_redis_executor = _futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="redis")
+
+
+def _redis_available() -> bool:
+    return bool(_redis_ok and _redis_client) and _redis_breaker.allow()
+
+
 def _tile_cache_get(key: str):
-    """Читает тайл: LRU (в процессе, ~мкс) → Redis (один MGET).
-    [PERF] Раньше порядок был обратный: каждый хит делал ДВА синхронных
-    сетевых запроса в Redis прямо в event loop, даже если тайл уже лежал
-    в памяти процесса. Хит из Redis теперь «поднимается» в LRU."""
+    """Синхронное чтение ТОЛЬКО из LRU процесса (микросекунды, безопасно в loop)."""
     with _tile_cache_lock:
         hit = _tile_cache.get(key)
         if hit is not None:
             _tile_cache.move_to_end(key)
             return hit
-    if _redis_ok and _redis_client:
-        try:
-            data, ct = _redis_client.mget(f"tile:{key}", f"tile:ct:{key}")
-            if data is not None:
-                value = (data, (ct or b"image/png").decode())
-                _tile_lru_put(key, value)
-                return value
-        except Exception as _e:
-            logger.debug(f"[tile-cache] Redis get error: {_e}")
+    return None
+
+
+def _tile_cache_redis_get(key: str):
+    """Блокирующее чтение из Redis — вызывать только из потока."""
+    try:
+        data, ct = _redis_client.mget(f"tile:{key}", f"tile:ct:{key}")
+        _redis_breaker.record_success()
+    except Exception as _e:
+        if _redis_breaker.record_failure():
+            logger.warning(f"[tile-cache] Redis недоступен, отключён на {_redis_breaker.cooldown:.0f} с: {_e}")
+        return None
+    if data is None:
+        return None
+    value = (data, (ct or b"image/png").decode())
+    _tile_lru_put(key, value)
+    return value
+
+
+async def _tile_cache_aget(key: str):
+    """Читает тайл: LRU (в процессе) → Redis (в threadpool). Хит из Redis
+    поднимается в LRU."""
+    hit = _tile_cache_get(key)
+    if hit is not None:
+        return hit
+    if _redis_available():
+        return await run_in_threadpool(_tile_cache_redis_get, key)
     return None
 
 
@@ -1638,19 +1687,27 @@ def _tile_lru_put(key: str, value: tuple):
             _tile_cache_bytes -= len(ev[0]) if ev[0] else 0
 
 
+def _tile_cache_redis_put(key: str, content: bytes, ct: str):
+    try:
+        pipe = _redis_client.pipeline(transaction=False)
+        pipe.setex(f"tile:{key}",    _REDIS_TILE_TTL, content)
+        pipe.setex(f"tile:ct:{key}", _REDIS_TILE_TTL, ct.encode())
+        pipe.execute()
+        _redis_breaker.record_success()
+    except Exception as _e:
+        if _redis_breaker.record_failure():
+            logger.warning(f"[tile-cache] Redis недоступен, отключён на {_redis_breaker.cooldown:.0f} с: {_e}")
+
+
 def _tile_cache_put(key: str, value: tuple):
-    """Записывает тайл (bytes, content_type): Redis + LRU."""
+    """Записывает тайл (bytes, content_type): LRU сразу, Redis — в фоне."""
     content, ct = value
-    if _redis_ok and _redis_client:
-        try:
-            pipe = _redis_client.pipeline(transaction=False)
-            pipe.setex(f"tile:{key}",    _REDIS_TILE_TTL, content)
-            pipe.setex(f"tile:ct:{key}", _REDIS_TILE_TTL, ct.encode())
-            pipe.execute()
-        except Exception as _e:
-            logger.debug(f"[tile-cache] Redis set error: {_e}")
-    # Всегда пишем в LRU (быстрый хит в том же процессе)
     _tile_lru_put(key, value)
+    if _redis_available():
+        try:
+            _redis_executor.submit(_tile_cache_redis_put, key, content, ct)
+        except RuntimeError:
+            pass  # интерпретатор завершается
 
 
 def _tile_cache_flush_all() -> dict:
@@ -2225,26 +2282,28 @@ def load_leshoz_data():
     global _leshoz_gdf_cache
     if _leshoz_gdf_cache is not None:
         return _leshoz_gdf_cache, None
+    # [v20.13] Загрузка целиком под замком: раньше замок закрывал только проверку,
+    # и при холодном старте N потоков читали SHP одновременно (пик RAM × N).
     with _leshoz_cache_lock:
         if _leshoz_gdf_cache is not None:
             return _leshoz_gdf_cache, None
-    shp_files = glob.glob(os.path.join(SHP_FOLDER, '*.shp'))
-    if not shp_files:
-        return None, "Файл .shp не найден в папке shp_leshoz"
-    shp_path = shp_files[0]
-    try:
+        shp_files = glob.glob(os.path.join(SHP_FOLDER, '*.shp'))
+        if not shp_files:
+            return None, "Файл .shp не найден в папке shp_leshoz"
+        shp_path = shp_files[0]
         try:
-            gdf = gpd.read_file(shp_path, encoding='cp1251')
-        except Exception:
-            gdf = gpd.read_file(shp_path, encoding='utf-8')
-        gdf_processed, error = process_forestry_gdf(gdf)
-        if error:
-            return None, error
-        _leshoz_gdf_cache = gdf_processed
-        return gdf_processed, None
-    except Exception as e:
-        logger.error(f"SHP Load Error: {e}")
-        return None, str(e)
+            try:
+                gdf = gpd.read_file(shp_path, encoding='cp1251')
+            except Exception:
+                gdf = gpd.read_file(shp_path, encoding='utf-8')
+            gdf_processed, error = process_forestry_gdf(gdf)
+            if error:
+                return None, error
+            _leshoz_gdf_cache = gdf_processed
+            return gdf_processed, None
+        except Exception as e:
+            logger.error(f"SHP Load Error: {e}")
+            return None, str(e)
 
 
 # ==========================================
@@ -2473,7 +2532,7 @@ def _login_register_success(ip: str) -> None:
 
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
+def login_page(request: Request):
     # [C] Токен создаётся заранее, чтобы форма могла его отправить обратно
     return templates.TemplateResponse(
         request=request,
@@ -2483,7 +2542,7 @@ async def login_page(request: Request):
 
 
 @app.post("/login")
-async def login_submit(
+def login_submit(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
@@ -2549,13 +2608,13 @@ async def login_submit(
 
 
 @app.get("/logout")
-async def logout(request: Request):
+def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/", status_code=302)
 
 
 @app.post("/api/admin/logout")
-async def api_admin_logout(request: Request):
+def api_admin_logout(request: Request):
     request.session.clear()
     return {"ok": True}
 
@@ -2575,7 +2634,7 @@ except Exception as _e:  # страница необязательна — се�
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request, db: Session = Depends(get_db)):
+def index(request: Request, db: Session = Depends(get_db)):
     ip      = get_real_ip(request)
     user_id = get_current_user(request)
 
@@ -2594,7 +2653,7 @@ async def index(request: Request, db: Session = Depends(get_db)):
     ip_has_profile = False
 
     if not is_admin:
-        ip_user = await run_in_threadpool(get_user_by_ip, ip)
+        ip_user = get_user_by_ip(ip)
         if ip_user and ip_user.get('status') not in ('deleted', 'frozen', 'banned'):
             ip_user_name   = (ip_user.get('user_name', '') or '').strip()
             ip_org_name    = (ip_user.get('organization_name', '') or '').strip()
@@ -2602,7 +2661,7 @@ async def index(request: Request, db: Session = Depends(get_db)):
 
     # Регистрируем визит только для настоящих гостей
     if not is_admin and not ip_has_profile:
-        await run_in_threadpool(register_visit, ip)
+        register_visit(ip)
 
     has_profile   = is_admin or ip_has_profile
     is_registered = has_profile
@@ -2631,13 +2690,13 @@ async def index(request: Request, db: Session = Depends(get_db)):
     )
 
 @app.post("/api/session/register")
-async def api_session_register(request: Request):
+def api_session_register(request: Request):
     """Регистрация сессии гостя — заглушка для совместимости."""
     ip = get_real_ip(request)
     return {"ok": True, "ip": ip, "status": "guest"}
 
 @app.get("/map.js")
-async def serve_map_js(request: Request):
+def serve_map_js(request: Request):
     static_path = os.path.join(BASE_DIR, 'static', 'map.js')
     root_path   = os.path.join(BASE_DIR, 'map.js')
     path = static_path if os.path.exists(static_path) else root_path
@@ -2669,12 +2728,16 @@ async def serve_map_js(request: Request):
 # ==========================================
 
 @app.get("/wms")
-async def wms_endpoint(request: Request, db: Session = Depends(get_db)):
+def wms_endpoint(request: Request, db: Session = Depends(get_db)):
     args = {k.upper(): v for k, v in request.query_params.items()}
     req_type = args.get('REQUEST', '')
     if req_type == 'GetCapabilities':
         return _get_capabilities()
     elif req_type == 'GetMap':
+        _bad = _wms_params_error(args)
+        if _bad:
+            return Response(_bad, status_code=400, media_type="text/plain; charset=utf-8")
+        # [v20.13] запрос к PostGIS, rasterio и кодирование PNG — в threadpool
         return _get_map(args, db)
     return Response("Unknown Request", status_code=400)
 
@@ -2764,7 +2827,7 @@ def _get_map(args: dict, db: Session):
 
         pil_img = Image.fromarray(np.moveaxis(canvas, 0, -1), 'RGBA')
         img_io = io.BytesIO()
-        pil_img.save(img_io, 'PNG', optimize=True, compress_level=6)
+        pil_img.save(img_io, 'PNG', optimize=False, compress_level=6)  # optimize=True ×2-3 CPU без выигрыша для тайла
         img_io.seek(0)
         return Response(
             img_io.read(),
@@ -2859,9 +2922,24 @@ async def api_zones_boundaries(request: Request):
 # Кэшируется в памяти + ETag + Cache-Control для nginx proxy_cache.
 # ==========================================
 
+def _clear_dir_files(root: str) -> int:
+    """Удаляет файлы в каталоге рекурсивно (кэш nginx). Кроссплатформенно:
+    раньше вызывался `find -delete`, который на Windows запускает find.exe
+    (поиск текста) и ничего не удаляет, но отчёт говорил «очищено»."""
+    removed = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            try:
+                os.remove(os.path.join(dirpath, fn))
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 _cb_cache_body: bytes = b""
 _cb_cache_etag: str   = ""
-_cb_lock = threading.Lock()
+_cb_lock = _asyncio.Lock()  # [v20.13] был threading.Lock поперёк await — второй запрос намертво вешал event loop
 
 
 def _build_country_boundary() -> bytes:
@@ -2921,7 +2999,7 @@ async def api_country_boundary(request: Request):
     global _cb_cache_body, _cb_cache_etag
 
     if not _cb_cache_body:
-        with _cb_lock:
+        async with _cb_lock:
             if not _cb_cache_body:
                 try:
                     _cb_cache_body = await run_in_threadpool(_build_country_boundary)
@@ -3303,11 +3381,42 @@ async def geoserver_wms_proxy(request: Request):
             fut.set_result(result)
 
 
+_WMS_MAX_SIDE = int(os.getenv("WMS_MAX_SIDE", "1024"))
+
+
+def _wms_params_error(params: dict):
+    """Проверяет WIDTH/HEIGHT/BBOX GetMap-запроса. Возвращает текст ошибки или None."""
+    lower = {k.lower(): v for k, v in params.items()}
+    if lower.get("request", "").upper() not in ("GETMAP", "GETFEATUREINFO", ""):
+        return None  # GetCapabilities/GetLegendGraphic — размеров нет
+    for name in ("width", "height"):
+        raw = lower.get(name)
+        if raw is None:
+            continue
+        try:
+            v = int(raw)
+        except ValueError:
+            return f"Некорректный {name.upper()}"
+        if not 1 <= v <= _WMS_MAX_SIDE:
+            return f"{name.upper()} вне диапазона 1..{_WMS_MAX_SIDE}"
+    bbox = lower.get("bbox")
+    if bbox is not None:
+        try:
+            parts = [float(x) for x in bbox.split(",")]
+        except ValueError:
+            return "Некорректный BBOX"
+        if len(parts) != 4 or not all(math.isfinite(x) for x in parts):
+            return "Некорректный BBOX"
+        if parts[0] >= parts[2] or parts[1] >= parts[3]:
+            return "Некорректный BBOX"
+    return None
+
+
 async def _geoserver_wms_proxy_impl(request: Request):
     target = request.query_params.get("_target", "GEOSERVER")
     base_urls = {
-        "GEOSERVER":     "http://192.168.12.109:9090/geoserver/wms",
-        "GEOSERVER_EXT": "http://192.168.12.109:9090/geoserver/External/wms",
+        "GEOSERVER":     GEOSERVER_BASE_URL + "/wms",
+        "GEOSERVER_EXT": GEOSERVER_BASE_URL + "/External/wms",
         "BELGOSLES":     "https://bank.belgosles.by/geoserver/BelGosLes/wms",
         "COVERSTYLE":    "https://bank.belgosles.by/geoserver/CoverStyleManage/wms",
     }
@@ -3318,6 +3427,13 @@ async def _geoserver_wms_proxy_impl(request: Request):
     # семафора/таймаута и НЕ пробрасывается в GeoServer.
     _kind_hint = request.query_params.get("_kind", "")
     params = {k: v for k, v in request.query_params.items() if k not in ("_target", "_kind")}
+
+    # [v20.13] Границы на размеры и BBOX: иначе WIDTH=20000 раздувает маску ЛУ до
+    # сотен МБ, а случайные значения забивают кэш уникальными ключами.
+    _bad = _wms_params_error(params)
+    if _bad:
+        return Response(_bad, status_code=400, media_type="text/plain; charset=utf-8",
+                        headers=_pk.no_store())
 
     # Определяем тип слоя: ЛУ-маска, bounds-контур или COG-снимок
     _wms_layers = params.get('LAYERS', params.get('layers', ''))
@@ -3351,7 +3467,7 @@ async def _geoserver_wms_proxy_impl(request: Request):
 
     # 1. Python in-memory / Redis кэш — мгновенный ответ без семафора
     if not _is_feature_info:
-        cached = _tile_cache_get(cache_key)
+        cached = await _tile_cache_aget(cache_key)
         if cached:
             content, ct = cached
             return _tile_ok_response(request, content, ct, _resp_headers)
@@ -3411,7 +3527,7 @@ async def _geoserver_wms_proxy_impl(request: Request):
     async with _semaphore:
         # Повторная проверка кэша внутри семафора (другой воркер мог уже заполнить)
         if not _is_feature_info:
-            cached = _tile_cache_get(cache_key)
+            cached = await _tile_cache_aget(cache_key)
             if cached:
                 content, ct = cached
                 return _tile_ok_response(request, content, ct, _resp_headers)
@@ -3470,9 +3586,12 @@ async def _geoserver_wms_proxy_impl(request: Request):
                     # закэширует этот пустой тайл на неделю. При 504 сработает
                     # "any 0" (не кэшируется) + proxy_cache_use_stale отдаст
                     # старый валидный тайл из кэша, если он есть.
-                    return Response(_EMPTY_PNG, status_code=504, media_type="image/png", headers=_resp_headers)
+                    return Response(_EMPTY_PNG, status_code=504, media_type="image/png", headers=_pk.no_store(_resp_headers))
                 if resp.status_code == 429:
-                    retry_after = int(resp.headers.get("Retry-After", 1 + _attempt))
+                    try:
+                        retry_after = min(3, max(0, int(resp.headers.get("Retry-After", 1 + _attempt))))
+                    except ValueError:  # Retry-After в формате HTTP-даты
+                        retry_after = 1 + _attempt
                     logger.warning(f"geoserver_wms_proxy: 429 от GeoServer, ждём {retry_after}s (попытка {_attempt+1}/{_max_attempts})")
                     await _asyncio.sleep(retry_after)
                     continue
@@ -3514,15 +3633,16 @@ async def _geoserver_wms_proxy_impl(request: Request):
                 logger.warning("geoserver_wms_proxy: GeoServer вернул 429 после 3 попыток, отдаём пустой тайл")
                 # FIX: было media_type=..., без status_code → уходило как 200
                 # и nginx кэшировал пустой тайл на 168ч. 503 не кэшируется.
-                return Response(_EMPTY_PNG, status_code=503, media_type="image/png", headers=_resp_headers)
+                return Response(_EMPTY_PNG, status_code=503, media_type="image/png", headers=_pk.no_store(_resp_headers))
 
+            # [v20.13] Ошибка апстрима не должна кэшироваться на сутки
             return Response(content, status_code=resp.status_code,
-                            media_type=ct, headers=_resp_headers)
+                            media_type=ct, headers=_pk.no_store(_resp_headers))
         except Exception as e:
             logger.warning(f"geoserver_wms_proxy: {e}")
             # FIX: тот же баг — любая иная ошибка (разрыв соединения, парсинг
             # и т.п.) отдавалась как 200 и намертво кэшировалась nginx-ом.
-            return Response(_EMPTY_PNG, status_code=502, media_type="image/png", headers=_resp_headers)
+            return Response(_EMPTY_PNG, status_code=502, media_type="image/png", headers=_pk.no_store(_resp_headers))
 
 
 # ============================================================
@@ -3540,6 +3660,23 @@ async def _geoserver_wms_proxy_impl(request: Request):
 #     headers:{'Content-Type':'application/json'},
 #     body: JSON.stringify({layers: activeLayerNames})})
 # ============================================================
+# [v20.13] Фоновые задачи держим в множестве: asyncio хранит только слабую ссылку,
+# и задача могла быть собрана GC до выполнения.
+_bg_tasks: set = set()
+
+
+def _spawn_bg(coro):
+    t = _asyncio.ensure_future(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
+
+# Один и тот же слой/зум прогреваем не чаще раза в 10 минут: фронтенд шлёт seed
+# при каждом включении слоя каждым пользователем — 100 пользователей = 100 × 320 запросов к GeoServer.
+_seed_recent = _pk.TTLCache(maxsize=2000, ttl=600.0)
+
+
 @app.post("/api/wms/seed")
 async def api_wms_seed(request: Request):
     """
@@ -3575,7 +3712,7 @@ async def api_wms_seed(request: Request):
     if not layers or not zooms:
         return {"ok": True, "queued": 0}
 
-    gs_ext_url = "http://192.168.12.109:9090/geoserver/External/wms"
+    gs_ext_url = GEOSERVER_BASE_URL + "/External/wms"
 
     async def _seed_one(layer_name: str, zoom: int, bbox: list):
         """Запрашивает один тайл для прогрева кэша GeoServer + LRU."""
@@ -3595,7 +3732,7 @@ async def api_wms_seed(request: Request):
             f"{k}={_sq(_suq(str(v)), safe='')}" for k, v in sorted(params.items())
         )
         # Пропускаем если уже в кэше
-        if _tile_cache_get(_cache_key):
+        if await _tile_cache_aget(_cache_key):
             return
 
         # bounds — быстрый семафор; cog — медленный
@@ -3603,7 +3740,7 @@ async def api_wms_seed(request: Request):
         _sem = _gs_bounds_semaphore if _is_bounds_layer else _gs_cog_semaphore
 
         async with _sem:
-            if _tile_cache_get(_cache_key):
+            if await _tile_cache_aget(_cache_key):
                 return
             try:
                 _p = params.copy()
@@ -3637,8 +3774,14 @@ async def api_wms_seed(request: Request):
         tasks = []
         for layer_name in layers:
             for zoom in zooms:
+                _seed_key = (layer_name, zoom)
+                if _seed_recent.get(_seed_key):
+                    continue
+                _seed_recent.put(_seed_key, True)
                 bbox = _tile_bbox_for_zoom(zoom, raw_bbox)
                 tasks.append(_seed_one(layer_name, zoom, bbox))
+        if not tasks:
+            return
         # Запускаем все задачи параллельно батчами по 32 чтобы не перегружать event loop
         _BATCH = 32
         for i in range(0, len(tasks), _BATCH):
@@ -3646,7 +3789,7 @@ async def api_wms_seed(request: Request):
         logger.info(f"[seed] завершён прогрев {len(layers)} слоёв × {len(zooms)} зумов")
 
     # Fire-and-forget: ответ сразу, прогрев идёт в фоне
-    _asyncio.create_task(_run_seed())
+    _spawn_bg(_run_seed())
 
     return {"ok": True, "queued": len(layers) * len(zooms), "layers": len(layers), "zooms": zooms}
 
@@ -3654,10 +3797,10 @@ async def api_wms_seed(request: Request):
 def reset_boundary_cache(_=Depends(require_admin)):
     """Сбрасывает все кэши маскирования + WMS-тайлы (LRU + Redis) + nginx кэш на диске."""
     global _cb_cache_body, _cb_cache_etag, _leshoz_gdf_cache
-    with _cb_lock:
-        _cb_cache_body = b""
-        _cb_cache_etag = ""
-    _leshoz_gdf_cache = None
+    _cb_cache_body = b""   # присваивание атомарно; _cb_lock — asyncio.Lock, в def-обработчике не нужен
+    _cb_cache_etag = ""
+    with _leshoz_cache_lock:
+        _leshoz_gdf_cache = None
     _geojson_resp_cache.clear()
     with _leshoz_geom_cache_lock:
         _leshoz_geom_cache.clear()
@@ -3674,11 +3817,9 @@ def reset_boundary_cache(_=Depends(require_admin)):
                 os.path.join(BASE_DIR, 'nginx_cache')]:
         if os.path.isdir(_nd):
             try:
-                import subprocess
-                subprocess.run(['find', _nd, '-type', 'f', '-delete'],
-                               capture_output=True, timeout=15)
+                _removed = _clear_dir_files(_nd)
                 nginx_cleared += 1
-                logger.info(f"reset-boundary-cache: очищен nginx кэш {_nd}")
+                logger.info(f"reset-boundary-cache: очищен nginx кэш {_nd} ({_removed} файлов)")
             except Exception as _ne:
                 logger.warning(f"reset-boundary-cache: ошибка очистки {_nd}: {_ne}")
     logger.info(f"reset-boundary-cache: lru={n} redis={flush_stats.get('redis',0)} nginx_dirs={nginx_cleared}")
@@ -3858,12 +3999,11 @@ def api_delete_vector_layer(
 # ==========================================
 
 @app.post("/api/admin/tokens/issue")
-async def api_admin_tokens_issue(
-    request: Request,
+def api_admin_tokens_issue(
+    request: Request, data=Depends(_json_body),
     db: Session = Depends(get_db),
     _=Depends(require_admin),
 ):
-    data = await request.json()
     user_id         = data.get("user_id", 0)
     ip              = data.get("ip", "")
     token_type      = data.get("token_type", "unlimited")
@@ -3890,7 +4030,7 @@ async def api_admin_tokens_issue(
         raise HTTPException(400, "Укажите expires_in_hours")
 
     ip = str(ip or '').strip()
-    profile = await run_in_threadpool(get_user_by_ip, ip)
+    profile = get_user_by_ip(ip)
     if not profile or profile.get('status') != 'active' or not (profile.get('user_name') or '').strip():
         raise HTTPException(400, "Нужен активный именованный профиль с указанным IP")
     user_id = profile['id']  # A stale browser row ID cannot create a second identity.
@@ -3905,7 +4045,7 @@ async def api_admin_tokens_issue(
 
 
 @app.post("/api/admin/tokens/{token_id}/revoke")
-async def api_admin_tokens_revoke(
+def api_admin_tokens_revoke(
     token_id: int,
     _=Depends(require_admin),
 ):
@@ -3916,7 +4056,7 @@ async def api_admin_tokens_revoke(
 
 
 @app.get("/api/tokens/my")
-async def api_tokens_my(request: Request):
+def api_tokens_my(request: Request):
     ip = get_real_ip(request)
     token_auto_deactivate_expired()
     tokens = token_get_by_ip(ip)
@@ -3937,11 +4077,10 @@ async def api_tokens_my(request: Request):
 
 
 @app.post("/api/tokens/validate")
-async def api_tokens_validate(request: Request):
+def api_tokens_validate(request: Request, data=Depends(_json_body)):
     user_id = get_current_user(request)
     if user_id:
         return {"ok": True, "reason": "admin"}
-    data = await request.json()
     token_str = (data.get("token") or "").strip()
     file_path = (data.get("file_path") or "").strip()
     if not token_str:
@@ -4254,10 +4393,24 @@ def get_status_by_ip(ip, device_id=None):
         return (u.id, u.status) if u else (None, 'new')
     finally: db.close()
 
+# [v20.13] Каждый GET / и /api/session/init писали строку в pg_login_history и
+# делали commit — при 100 пользователях это сотни записей в минуту. Теперь не
+# чаще раза в минуту на IP; между записями — только чтение статуса.
+_visit_throttle = _pk.Throttle(interval=float(os.getenv("VISIT_WRITE_INTERVAL", "60")), maxsize=50000)
+
+
 def register_visit(ip, device_id=None):
     if not is_tracked_ip(ip):
         return None, 'active'
     ip = str(ip).strip()
+    if not _visit_throttle.should(ip):
+        try:
+            uid, st = get_status_by_ip(ip, device_id)
+            if uid is not None:
+                return (None, st) if st in ('deleted', 'frozen', 'banned') else (uid, 'active')
+        except Exception:
+            pass
+        _visit_throttle.forget(ip)  # пользователя ещё нет — пишем сразу
     db = _pg()
     try:
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -4616,7 +4769,7 @@ def _me_fetch_cached(date, time_from='00:00', time_to='23:59', satellite=None, t
     return data, sc
 
 # ══ GEOSERVER PROXIES ═══════════════════════════════════════════════
-_GS_BASE = 'http://192.168.12.109:9090/geoserver'
+_GS_BASE = GEOSERVER_BASE_URL
 _GS_PREFIX = '/geoserver-proxy'
 _gs_session = requests.Session()
 # [SEC v16] Логин/пароль GeoServer были зашиты в код (admin/geoserver — пароль
@@ -4630,7 +4783,7 @@ if not _GS_PASSWORD:
 _gs_session.auth = (_GS_USER, _GS_PASSWORD)
 _gs_session.verify = os.getenv('GEOSERVER_VERIFY_TLS', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 GEOSERVER_WMS_URL = "http://192.168.12.109:8081/geoserver/wms"
-GEOSERVER_WFS_URL = os.getenv("GEOSERVER_WFS_URL", "http://192.168.12.109:9090/geoserver/wfs")
+GEOSERVER_WFS_URL = os.getenv("GEOSERVER_WFS_URL", GEOSERVER_BASE_URL + "/wfs")
 _TILE_PROXY_ALLOWED_HOSTS = {
     '192.168.12.109','93.84.108.142','bank.belgosles.by',
     'tile.openstreetmap.org','a.tile.openstreetmap.org','b.tile.openstreetmap.org','c.tile.openstreetmap.org',
@@ -4669,7 +4822,34 @@ _GEO_ADDR_RE = re.compile(r"(?i)\d|(?<![а-яё])(ул|улица|пр|пр-т|�
                           r"тракт|наб|набережная|проезд|туп|тупик|мкр|микрорайон|вул|вуліца)(?![а-яё])")
 
 
+# [v20.13] Nominatim (политика ≤1 запрос/с) без кэша: ввод 100 пользователей с
+# автоподсказкой = бан IP и отказ поиска для всех. Ответы кэшируются на 10 минут,
+# обращения к внешнему сервису выстраиваются в очередь ~1 rps.
+_geocode_cache = _pk.TTLCache(maxsize=int(os.getenv("GEOCODE_CACHE_MAX", "5000")),
+                              ttl=float(os.getenv("GEOCODE_CACHE_TTL", "600")))
+_nominatim_lock = threading.Lock()
+_nominatim_last = [0.0]
+_NOMINATIM_MIN_INTERVAL = float(os.getenv("NOMINATIM_MIN_INTERVAL", "1.0"))
+
+
+def _nominatim_pace():
+    """Ждёт очереди к Nominatim (вызывать из потока). Ожидание ограничено 5 с."""
+    with _nominatim_lock:
+        now = time.monotonic()
+        wait = _nominatim_last[0] + _NOMINATIM_MIN_INTERVAL - now
+        if wait > 5.0:
+            raise RuntimeError("Nominatim: очередь переполнена")
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last[0] = time.monotonic()
+
+
 def _geocode_plain(q: str, limit: int):
+    _ck = ("plain", q.lower(), limit)
+    _hit = _geocode_cache.get(_ck)
+    if _hit is not None:
+        return _hit
+    _nominatim_pace()
     url = (
         f"https://nominatim.openstreetmap.org/search"
         f"?q={requests.utils.quote(q)}"
@@ -4682,6 +4862,7 @@ def _geocode_plain(q: str, limit: int):
     })
     resp.raise_for_status()
     data = resp.json()
+    _geocode_cache.put(_ck, data)
     return data if isinstance(data, list) else []
 
 
@@ -4699,6 +4880,19 @@ def geocode_proxy(q: str, limit: int = 10, city: Optional[str] = None, lat: Opti
     data = []
     if not q:
         return JSONResponse(content=[])
+    _rk = ("resp", q.lower(), limit, (city or "").lower(), fuzzy,
+           None if lat is None else round(lat, 1), None if lon is None else round(lon, 1))
+    _cached = _geocode_cache.get(_rk)
+    if _cached is not None:
+        return JSONResponse(content=_cached, headers={"X-Cache": "HIT"})
+    _result = _geocode_proxy_impl(q, limit, city, lat, lon, fuzzy)
+    if _result:
+        _geocode_cache.put(_rk, _result)
+    return JSONResponse(content=_result)
+
+
+def _geocode_proxy_impl(q, limit, city, lat, lon, fuzzy):
+    data = []
     if not city:
         try:
             data = _geocode_plain(q, limit)
@@ -4727,7 +4921,7 @@ def geocode_proxy(q: str, limit: int = 10, city: Optional[str] = None, lat: Opti
                 logger.warning(f"[geocode_proxy] fuzzy: {e}")
             finally:
                 _GEO_FUZZY_SEM.release()
-    return JSONResponse(content=data or plain or [])
+    return data or plain or []
 
 
 @app.on_event("startup")
@@ -4744,7 +4938,7 @@ async def _geocoder_warmup():
     threading.Thread(target=_warm, daemon=True, name="geocoder-warmup").start()
 
 @app.get("/health")
-async def health():
+def health():
     # no-store: используется индикатором соединения (static/net-status.js) —
     # ответ не должен браться из кэша браузера/nginx/Service Worker.
     # [v18 PERF] no-cache вместо no-store: ответ всё так же не берётся из кэша без проверки,
@@ -4754,7 +4948,7 @@ async def health():
 
 
 @app.get("/sw.js", include_in_schema=False)
-async def service_worker():
+def service_worker():
     """Service Worker должен отдаваться из корня, чтобы его scope был '/'."""
     path = os.path.join(_STATIC_DIR, "sw.js")
     if not os.path.exists(path):
@@ -4949,7 +5143,7 @@ async def api_news_img(u: str = Query(..., min_length=10, max_length=2048)):
         "X-Content-Type-Options": "nosniff"})
 
 @app.get("/uploads/{filename:path}")
-async def uploaded_file(request: Request, filename: str):
+def uploaded_file(request: Request, filename: str):
     # [SEC v16] Было os.path.join(UPLOAD_FOLDER, filename): «/uploads//etc/passwd»,
     # «/uploads/C:/Windows/win.ini» или «%2F..» отдавали ЛЮБОЙ файл сервера.
     p = _sh.safe_join(UPLOAD_FOLDER, filename)
@@ -4984,6 +5178,12 @@ def _images_cache_invalidate():
     global _images_cache, _images_cache_ts
     _images_cache = []
     _images_cache_ts = 0.0
+    # [v20.13] состав снимков изменился — индекс контуров и тайлы тоже устарели
+    # (раньше /upload и /delete_image сбрасывали только список, но не тайлы)
+    try:
+        _invalidate_raster_tile_cache()
+    except Exception as _e:
+        logger.warning(f"[images] сброс кэша тайлов: {_e}")
 
 @app.get("/api/images")
 def get_images(db: Session = Depends(get_db)):
@@ -5576,9 +5776,18 @@ def delete_mbtiles(layer_id: int, db: Session = Depends(get_db), _=Depends(requi
 
     return {"success": True}
 
+_raster_inflight = _pk.SingleFlight()
+
+
+@functools.lru_cache(maxsize=1)
+def _blank_tile_bytes() -> bytes:
+    buf = io.BytesIO(); Image.new('RGBA', (256, 256), (0, 0, 0, 0)).save(buf, 'PNG', optimize=True)
+    return buf.getvalue()
+
+
 def _send_blank_tile():
-    buf = io.BytesIO(); Image.new('RGBA',(256,256),(0,0,0,0)).save(buf,'PNG',optimize=True)
-    return Response(buf.getvalue(), media_type="image/png", headers={
+    # PNG кодируется один раз, а не на каждый пустой тайл
+    return Response(_blank_tile_bytes(), media_type="image/png", headers={
         "Cache-Control": "public, max-age=60, s-maxage=60",
     })
 
@@ -5745,6 +5954,8 @@ def _invalidate_raster_tile_cache(leskhoz_id: str = None):
     try:
         _raster_lru_clear()  # сначала LRU — мгновенно
         try:
+            _raster_empty_cache.clear()
+            _imagery_index_clear()
             _raster_final_clear()   # [PERF] готовые тайлы в RAM
         except NameError:
             pass
@@ -5805,30 +6016,81 @@ def _blank_rgba_png():
         _BLANK_RGBA_PNG = b.getvalue()
     return _BLANK_RGBA_PNG
 
+# [v20.13] Негативный кэш: большая часть тайлов карты не пересекает ни одного снимка,
+# но раньше каждый такой запрос шёл в PostGIS (ST_Intersects) — при 100 пользователях
+# это сотни запросов к БД в секунду ради пустого ответа. Сбрасывается при загрузке снимка.
+_raster_empty_cache = _pk.TTLCache(maxsize=int(os.getenv("RASTER_EMPTY_CACHE_MAX", "200000")),
+                                   ttl=float(os.getenv("RASTER_EMPTY_CACHE_TTL", "600")))
+
+
+# [v20.13] Контуры снимков — в памяти (shapely STRtree). Таблица imagery небольшая
+# (сотни строк), а запрос ST_Intersects шёл в PostGIS на КАЖДЫЙ непрогретый тайл:
+# connect + pre-ping + SELECT + rollback ≈ 3-5 мс и соединение из пула на каждый тайл.
+# Индекс перестраивается не чаще раза в IMAGERY_INDEX_TTL с и сбрасывается при загрузке снимка.
+_imagery_index_lock = threading.Lock()
+_imagery_index: dict = {"tree": None, "names": [], "ts": 0.0}
+_IMAGERY_INDEX_TTL = float(os.getenv("IMAGERY_INDEX_TTL", "300"))
+
+
+def _imagery_index_clear():
+    with _imagery_index_lock:
+        _imagery_index["ts"] = 0.0
+
+
+def _imagery_names_for_bbox(west: float, south: float, east: float, north: float) -> list:
+    """Имена файлов снимков, пересекающих bbox (EPSG:4326)."""
+    from shapely.strtree import STRtree
+    now = time.monotonic()
+    with _imagery_index_lock:
+        if _imagery_index["tree"] is None or now - _imagery_index["ts"] > _IMAGERY_INDEX_TTL:
+            db = SessionLocal()
+            try:
+                rows = db.query(Imagery.filename, Imagery.geom).filter(Imagery.geom.isnot(None)).all()
+            finally:
+                db.close()
+            geoms, names = [], []
+            for fn, g in rows:
+                try:
+                    geoms.append(to_shape(g)); names.append(fn)
+                except Exception:
+                    continue
+            _imagery_index["tree"] = STRtree(geoms) if geoms else STRtree([])
+            _imagery_index["names"] = names
+            _imagery_index["ts"] = now
+        tree, names = _imagery_index["tree"], _imagery_index["names"]
+    if not names:
+        return []
+    idx = tree.query(box(west, south, east, north), predicate="intersects")
+    return [names[i] for i in idx]
+
+
 def _raster_tile_sync(z: int, x: int, y: int, tile_quality: str):
-    """Весь тяжёлый путь тайла (диск, PostGIS, rasterio, PIL) — в потоке."""
+    """Весь тяжёлый путь тайла (диск, индекс снимков, rasterio, PIL) — в потоке."""
+    if _raster_empty_cache.get((z, x, y)):
+        return None
     src_name = "lru-cache"
     png = _raster_lru_get(z, x, y)
     if not png:
         png = _tile_disk_get(z, x, y)
         src_name = "disk-cache"
         if png:
+            if png == _blank_rgba_png():
+                # пустой тайл с диска: короткий TTL (60 с), а не immutable на 7 дней —
+                # иначе новый снимок не виден неделю в браузере и nginx
+                _raster_empty_cache.put((z, x, y), True)
+                return None
             _raster_lru_put(z, x, y, png)
     if not png:
         ll = mercantile.bounds(x, y, z)
         tb = mercantile.xy_bounds(x, y, z)
-        from sqlalchemy import func as sqlfunc
-        sg = sqlfunc.ST_MakeEnvelope(ll.west, ll.south, ll.east, ll.north, 4326)
-        db = SessionLocal()
-        try:
-            names = [r[0] for r in db.query(Imagery.filename).filter(sqlfunc.ST_Intersects(Imagery.geom, sg)).all()]
-        finally:
-            db.close()
+        names = _imagery_names_for_bbox(ll.west, ll.south, ll.east, ll.north)
         if not names:
+            _raster_empty_cache.put((z, x, y), True)
             return None
         png = _render_raster_tile([os.path.join(UPLOAD_FOLDER, n) for n in names], tb)
         if png is None:
             _tile_disk_put(z, x, y, _blank_rgba_png())   # пустой тайл — чтобы не дёргать БД повторно
+            _raster_empty_cache.put((z, x, y), True)
             return None
         _tile_disk_put(z, x, y, png)
         _raster_lru_put(z, x, y, png)
@@ -5845,21 +6107,31 @@ async def get_raster_tile(z: int, x: int, y: int, request: Request):
     hit = _raster_final_get(key)
     if hit is not None:
         return Response(hit[0], media_type=hit[1], headers={**_TILE_RESP_HEADERS, "X-Tile-Quality": tile_quality, "X-Tile-Source": "ram"})
-    try:
+
+    async def _render():
+        hit2 = _raster_final_get(key)
+        if hit2 is not None:
+            return hit2[0], hit2[1], "ram"
         async with _raster_tile_semaphore:
             res = await run_in_threadpool(_raster_tile_sync, z, x, y, tile_quality)
+        if res is not None:
+            _raster_final_put(key, (res[0], res[1]))
+        return res
+
+    try:
+        # [v20.13] single-flight: 100 пользователей на одном непрогретом тайле — один рендер
+        res = await _raster_inflight.run(key, _render)
     except Exception as e:
         logger.error(f"Tile error {z}/{x}/{y}: {e}")
         return _send_blank_tile()
     if res is None:
         return _send_blank_tile()
     data, media, src_name = res
-    _raster_final_put(key, (data, media))
     return Response(data, media_type=media, headers={**_TILE_RESP_HEADERS, "X-Tile-Quality": tile_quality, "X-Tile-Source": src_name})
 
 
 @app.post("/api/admin/reset-tile-cache")
-async def reset_tile_cache(_=Depends(require_admin)):
+def reset_tile_cache(_=Depends(require_admin)):
     """Сбрасывает дисковый кэш растровых тайлов."""
     _invalidate_raster_tile_cache()
     return {"ok": True, "message": "Дисковый кэш тайлов сброшен"}
@@ -6128,10 +6400,9 @@ async def api_cache_purge(
 
     # ── Шаг 2: Дисковый кэш тайлов ───────────────────────────────────────
     try:
-        before = sum(
-            len(files) for _, _, files in os.walk(_TILE_DISK_CACHE)
-        )
-        _invalidate_raster_tile_cache()
+        before = await run_in_threadpool(
+            lambda: sum(len(files) for _, _, files in os.walk(_TILE_DISK_CACHE)))
+        await run_in_threadpool(_invalidate_raster_tile_cache)
         report["steps"]["disk_tile_cache"] = {"files_removed": before}
     except Exception as _e:
         report["steps"]["disk_tile_cache"] = {"error": str(_e)}
@@ -6139,10 +6410,11 @@ async def api_cache_purge(
     # ── Шаг 3: Сброс in-memory границ / маски ─────────────────────────────
     global _cb_cache_body, _cb_cache_etag, _leshoz_gdf_cache
     try:
-        with _cb_lock:
+        async with _cb_lock:
             _cb_cache_body = b""
             _cb_cache_etag = ""
-        _leshoz_gdf_cache = None
+        with _leshoz_cache_lock:
+            _leshoz_gdf_cache = None
         with _leshoz_geom_cache_lock:
             _leshoz_geom_cache.clear()
         with _leshoz_mask_cache_lock:
@@ -6186,13 +6458,9 @@ async def api_cache_purge(
                 continue
         if os.path.isdir(_nd):
             try:
-                import subprocess
-                subprocess.run(
-                    ["find", _nd, "-type", "f", "-delete"],
-                    capture_output=True, timeout=30
-                )
+                _removed = await run_in_threadpool(_clear_dir_files, _nd)
                 nginx_dirs_cleared += 1
-                logger.info(f"[cache/purge] nginx disk cleared: {_nd}")
+                logger.info(f"[cache/purge] nginx disk cleared: {_nd} ({_removed} файлов)")
             except Exception as _ne:
                 logger.warning(f"[cache/purge] nginx disk error {_nd}: {_ne}")
     report["steps"]["nginx_disk"] = {"dirs_cleared": nginx_dirs_cleared}
@@ -6229,7 +6497,7 @@ async def proxy_dzz_tile(request: Request, z: int, y: int, x: int):
     if not (0 <= z <= 22 and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
         return _dzz_empty()
     key = f"dzz:{z}/{y}/{x}"
-    hit = _tile_cache_get(key)
+    hit = await _tile_cache_aget(key)
     if hit:
         return _tile_ok_response(request, hit[0], hit[1], _DZZ_TILE_HEADERS)
     fut = _dzz_inflight.get(key)
@@ -6300,7 +6568,7 @@ async def geoserver_pbf_proxy(request: Request, layer: str, z: int, x: int, y: i
     if not (0 <= z <= 22 and 0 <= x < (1 << z) and 0 <= y < (1 << z)) or len(layer) > 200:
         return Response(status_code=400)
     key = f"pbf:{layer}:{z}/{x}/{y}"
-    hit = _tile_cache_get(key)
+    hit = await _tile_cache_aget(key)
     if hit:
         return _tile_ok_response(request, hit[0], hit[1], _TILE_RESPONSE_HEADERS)
     try:
@@ -6424,7 +6692,7 @@ async def geoserver_web_proxy(path: str, request: Request, _admin=Depends(requir
     return Response(body_out,status_code=gs_resp.status_code,headers=out_h,media_type=ct)
 
 @app.get("/api/download_cog")
-async def api_download_cog(request: Request, layer: str=Query(...), _=Depends(require_admin)):
+def api_download_cog(request: Request, layer: str=Query(...), _=Depends(require_admin)):
     """Прямое скачивание COG-файла администратором (без токена)."""
     file_path, display_filename = _resolve_cog_path(layer)
     if not file_path:
@@ -6434,7 +6702,7 @@ async def api_download_cog(request: Request, layer: str=Query(...), _=Depends(re
     return _stream_file_response(file_path, filename, request)
 
 @app.get("/api/dzz/download")
-async def api_dzz_download(request: Request, layer: str = Query(...),
+def api_dzz_download(request: Request, layer: str = Query(...),
                             token: Optional[str] = Query(None),
                             db: Session = Depends(get_db)):
     ip = get_real_ip(request)
@@ -6471,14 +6739,13 @@ async def api_dzz_download(request: Request, layer: str = Query(...),
     return _stream_file_response(file_path, filename, request)
 
 @app.post("/api/download_token")
-async def api_download_token(request: Request):
+def api_download_token(request: Request, data=Depends(_json_body)):
     """Выдаёт одноразовый токен скачивания. Доступно авторизованным пользователям."""
     _dl_cleanup2()
     user_id = get_current_user(request)
     if not user_id:
         raise HTTPException(403, "Требуется авторизация")
 
-    data = await request.json()
     file_path = data.get("file_path", "").strip()
     label = data.get("label", file_path)
     if not file_path:
@@ -6499,7 +6766,7 @@ async def api_download_token(request: Request):
     return {"token": token}
 
 @app.get("/api/download_file")
-async def api_download_file_v2(request: Request, token: str = Query(...)):
+def api_download_file_v2(request: Request, token: str = Query(...)):
     _dl_cleanup2()
     with _dl_lock2:
         entry = _dl_tokens2.get(token)
@@ -6527,7 +6794,7 @@ async def api_download_file_v2(request: Request, token: str = Query(...)):
 
 # ── USERS ──────────────────────────────────────────────────
 @app.get("/api/users/me")
-async def api_user_me(request: Request):
+def api_user_me(request: Request):
     ip      = get_real_ip(request)
     device_id = get_device_id(request)
     user_id = get_current_user(request)
@@ -6542,7 +6809,7 @@ async def api_user_me(request: Request):
 # Endpoint для фронтенда — авто-определение профиля по IP
 # Фронтенд вызывает /poi/avatar/me для получения данных текущего пользователя
 @app.get("/poi/avatar/me")
-async def poi_avatar_me(request: Request):
+def poi_avatar_me(request: Request):
     ip      = get_real_ip(request)
     device_id = get_device_id(request)
     user_id = get_current_user(request)
@@ -6554,7 +6821,7 @@ async def poi_avatar_me(request: Request):
     if user_id:
         return {"ip": ip, "user_name": "Admin", "organization_name": "",
                 "has_profile": True, "is_admin": True, "status": "active"}
-    info = await run_in_threadpool(get_user_by_ip, ip, device_id)
+    info = get_user_by_ip(ip, device_id)
     if info and info.get('status') not in ('deleted', 'frozen', 'banned'):
         name = (info.get("user_name") or "").strip()
         org  = (info.get("organization_name") or "").strip()
@@ -6567,10 +6834,10 @@ async def poi_avatar_me(request: Request):
             "has_profile": False, "is_admin": False, "status": "new"}
 
 @app.get("/api/users/all")
-async def api_users_all(_=Depends(require_admin)): return get_all_users_admin()
+def api_users_all(_=Depends(require_admin)): return get_all_users_admin()
 
 @app.post("/api/users/update/{uid}")
-async def api_users_update(uid: int, request: Request, _=Depends(require_admin)):
+async def api_users_update(uid: int, request: Request, data=Depends(_json_body), _=Depends(require_admin)):
     db = _pg()
     try:
         u = db.query(PgUser).filter(PgUser.id == uid).first()
@@ -6578,12 +6845,11 @@ async def api_users_update(uid: int, request: Request, _=Depends(require_admin))
             raise HTTPException(403, "Нельзя редактировать защищённого пользователя")
     finally:
         db.close()
-    data = await request.json()
     update_user_data(uid, data.get("user_name",""), data.get("org_name",""))
     return {"ok": True}
 
 @app.get("/api/users/history")
-async def api_users_history(_=Depends(require_admin)): return get_login_history(5000)
+def api_users_history(_=Depends(require_admin)): return get_login_history(5000)
 
 @app.post("/api/admin/history/cleanup")
 def api_history_cleanup(_=Depends(require_admin)):
@@ -6619,7 +6885,7 @@ def api_users_freeze(uid: int, _=Depends(require_admin)):
     set_status(uid, "frozen"); return {"ok": True}
 
 @app.post("/api/users/unfreeze/{uid}")
-async def api_users_unfreeze(uid: int, _=Depends(require_admin)):
+def api_users_unfreeze(uid: int, _=Depends(require_admin)):
     set_status(uid, "active"); return {"ok": True}
 
 @app.post("/api/users/delete/{uid}")
@@ -6634,19 +6900,19 @@ def api_users_delete(uid: int, _=Depends(require_admin)):
     set_status(uid, "banned"); return {"ok": True}
 
 @app.get("/api/users/pending")
-async def api_users_pending(_=Depends(require_admin)): return get_pending_requests()
+def api_users_pending(_=Depends(require_admin)): return get_pending_requests()
 
 @app.post("/api/users/approve/{req_id}")
 async def api_users_approve(req_id: int, _=Depends(require_admin)):
     approve_request(req_id); return {"ok":True}
 
 @app.post("/api/users/reject/{req_id}")
-async def api_users_reject(req_id: int, _=Depends(require_admin)):
+def api_users_reject(req_id: int, _=Depends(require_admin)):
     reject_request(req_id); return {"ok":True}
 
 @app.post("/api/users/submit_form")
-async def api_submit_user_form(request: Request):
-    ip=get_real_ip(request); device_id=get_device_id(request); data=await request.json()
+def api_submit_user_form(request: Request, data=Depends(_json_body)):
+    ip=get_real_ip(request); device_id=get_device_id(request)
     req_user=data.get("user_name","").strip(); req_org=data.get("org_name","").strip()
     if not req_user or not req_org: raise HTTPException(400,"Заполните все поля")
     uid,_=get_status_by_ip(ip, device_id)
@@ -6657,7 +6923,7 @@ async def api_submit_user_form(request: Request):
     return {"ok":True,"message":"Заявка отправлена. Ожидайте подтверждения администратора."}
 
 @app.get("/api/users/can_download")
-async def api_can_download(request: Request):
+def api_can_download(request: Request):
     ip=get_real_ip(request); device_id=get_device_id(request)
     info=get_user_info_by_ip(ip, device_id)
     return {"can_download":bool(info and info.get("user_name") and info.get("org_name"))}
@@ -6701,8 +6967,8 @@ def api_users_online(request: Request):
 
 # ── SESSION ────────────────────────────────────────────────
 @app.post("/api/session/submit_profile")
-async def api_session_submit_profile(request: Request):
-    ip=get_real_ip(request); device_id=get_device_id(request); data=await request.json()
+def api_session_submit_profile(request: Request, data=Depends(_json_body)):
+    ip=get_real_ip(request); device_id=get_device_id(request)
     req_user=data.get("user_name","").strip(); req_org=data.get("organization_name","").strip()
     if not req_user or not req_org: raise HTTPException(400,"Заполните все поля")
     uid,_=get_status_by_ip(ip, device_id)
@@ -6713,12 +6979,12 @@ async def api_session_submit_profile(request: Request):
     return {"ok":True,"message":"Заявка отправлена. Ожидайте подтверждения."}
 
 @app.get("/api/session/check")
-async def api_session_check(request: Request):
+def api_session_check(request: Request):
     ip=get_real_ip(request); device_id=get_device_id(request)
     _,status=get_status_by_ip(ip, device_id); return {"status":status or "active"}
 
 @app.get("/api/session/me")
-async def api_session_me(request: Request):
+def api_session_me(request: Request):
     """Возвращает единый профиль текущего IP независимо от браузера (для авто-входа на фронтенде)."""
     ip      = get_real_ip(request)
     device_id = get_device_id(request)
@@ -6733,7 +6999,7 @@ async def api_session_me(request: Request):
         return {"ip": ip, "user_name": "Admin", "organization_name": "",
                 "has_profile": True, "is_admin": True, "status": "active",
                 "display_name": "Admin"}
-    info = await run_in_threadpool(get_user_by_ip, ip, device_id)
+    info = get_user_by_ip(ip, device_id)
     if info and info.get('status') not in ('deleted', 'frozen', 'banned'):
         name = (info.get("user_name") or "").strip()
         org  = (info.get("organization_name") or "").strip()
@@ -6812,7 +7078,7 @@ async def api_session_init(request: Request):
 
 # ── MESSAGES ───────────────────────────────────────────────
 @app.get("/api/messages/inbox_count")
-async def api_messages_inbox_count(request: Request):
+def api_messages_inbox_count(request: Request):
     ip=get_real_ip(request); device_id=get_device_id(request); user_id=get_current_user(request)
     # [FIX] _is_registered_or_admin() тоже может делать синхронный db.query()
     # внутри — весь блок (проверка + подсчёт) уходит в один поход в threadpool,
@@ -6828,15 +7094,15 @@ async def api_messages_inbox_count(request: Request):
         try:
             return db.query(PgMessage).filter(PgMessage.to_ip==ip, PgMessage.is_read==0).count()
         finally: db.close()
-    cnt = await run_in_threadpool(_inbox_sync)
+    cnt = _inbox_sync()
     if cnt is None: return {"count":0,"registered":False}
     return {"count":cnt,"registered":True}
 
 @app.post("/api/messages/send")
-async def api_messages_send(request: Request):
+def api_messages_send(request: Request, data=Depends(_json_body)):
     ip=get_real_ip(request); device_id=get_device_id(request); user_id=get_current_user(request)
-    if not await run_in_threadpool(_is_registered_or_admin, ip, user_id, device_id): raise HTTPException(403,"Нет доступа")
-    data=await request.json(); to_ip=data.get('to_ip','').strip(); body=data.get('body','').strip()
+    if not _is_registered_or_admin(ip, user_id, device_id): raise HTTPException(403,"Нет доступа")
+    to_ip=data.get('to_ip','').strip(); body=data.get('body','').strip()
     if not to_ip or not body: raise HTTPException(400,"Пустое сообщение или получатель")
     if len(body)>2000: raise HTTPException(400,"Слишком длинное сообщение")
     now=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -7096,10 +7362,9 @@ def api_ecp_get(request: Request, name: str = ""):
 
 
 @app.post("/api/ecp/save")
-async def api_ecp_save(request: Request):
+def api_ecp_save(request: Request, data=Depends(_json_body)):
     """[v18] Сохранить ЧЕРНОВИК подписи — без ограничений по количеству.
     Недоступно, только пока утверждённая подпись заблокирована."""
-    data = await request.json()
     ip, name, _own_or_mgr, _ = _ecp_resolve_name(request, data.get('name') or '')
     sig_data = data.get('sig_data') or ''
     _ecp_check_sig(sig_data)
@@ -7127,10 +7392,9 @@ async def api_ecp_save(request: Request):
 
 
 @app.post("/api/ecp/approve")
-async def api_ecp_approve(request: Request):
+def api_ecp_approve(request: Request, data=Depends(_json_body)):
     """[v18] Утвердить подпись: присланную (sig_data) или сохранённый черновик.
     После утверждения ЭЦП блокируется на ECP_LOCK_MONTHS месяцев."""
-    data = await request.json()
     ip, name, _own_or_mgr, who = _ecp_resolve_name(request, data.get('name') or '')
     now_dt = datetime.now()
     now = now_dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -7164,8 +7428,7 @@ async def api_ecp_approve(request: Request):
 
 
 @app.post("/api/ecp/discard_draft")
-async def api_ecp_discard_draft(request: Request):
-    data = await request.json()
+def api_ecp_discard_draft(request: Request, data=Depends(_json_body)):
     _ip, name, _own_or_mgr, _ = _ecp_resolve_name(request, data.get('name') or '')
     db = _pg()
     try:
@@ -7185,12 +7448,11 @@ async def api_ecp_discard_draft(request: Request):
 
 
 @app.post("/api/ecp/unlock")
-async def api_ecp_unlock(request: Request):
+def api_ecp_unlock(request: Request, data=Depends(_json_body)):
     """[v18] Досрочно снять 6-месячную блокировку (например, подпись
     утверждена по ошибке). Только администратор (с доп. паролем)."""
     require_admin(request)
     verify_csrf(request)
-    data = await request.json()
     name = (data.get('name') or '').strip()
     if not name:
         raise HTTPException(400, "Не указано ФИО таксатора")
@@ -7246,11 +7508,10 @@ def api_print_queue_meta(request: Request):
 
 
 @app.post("/api/print_queue/add")
-async def api_print_queue_add(request: Request):
+def api_print_queue_add(request: Request, data=Depends(_json_body)):
     ip = get_real_ip(request); user_id = get_current_user(request)
     if not _is_registered_or_admin(ip, user_id, get_device_id(request)):
         raise HTTPException(403, "Нет доступа")
-    data = await request.json()
 
     leshoz = (data.get('leshoz') or '').strip()
     expedition = (data.get('expedition') or '').strip()
@@ -7326,11 +7587,10 @@ async def api_print_queue_add(request: Request):
 
 
 @app.post("/api/print_queue/{entry_id}/status")
-async def api_print_queue_set_status(entry_id: int, request: Request):
+def api_print_queue_set_status(entry_id: int, request: Request, data=Depends(_json_body)):
     ip = get_real_ip(request); user_id = get_current_user(request)
     if not _can_manage_print_queue(ip, user_id, get_device_id(request)):
         raise HTTPException(403, "Изменение статуса доступно только администратору и сотрудникам ОДЗиМЛ")
-    data = await request.json()
     new_status = (data.get('status') or '').strip()
     if new_status not in _PQ_VALID_STATUSES:
         raise HTTPException(400, "Неизвестный статус")
@@ -7359,7 +7619,7 @@ async def api_print_queue_set_status(entry_id: int, request: Request):
 
 
 @app.post("/api/print_queue/{entry_id}/update")
-async def api_print_queue_update(entry_id: int, request: Request):
+def api_print_queue_update(entry_id: int, request: Request, data=Depends(_json_body)):
     """Сохранение правок, сделанных во вкладке «Просмотр Excel».
 
     Требует прав на редактирование очереди (как смена статуса/удаление)
@@ -7371,7 +7631,6 @@ async def api_print_queue_update(entry_id: int, request: Request):
     if not _can_manage_print_queue(ip, user_id, get_device_id(request)):
         raise HTTPException(403, "Редактирование записей доступно только администратору и сотрудникам ОДЗиМЛ")
 
-    data = await request.json()
     ecp_user = (data.get('ecp_user') or '').strip()
     ecp_sig_data = data.get('ecp_sig_data') or ''
     if not ecp_user or not ecp_sig_data:
@@ -7468,11 +7727,10 @@ def api_print_queue_status_history(entry_id: int, request: Request):
 
 
 @app.post("/api/print_queue/reorder")
-async def api_print_queue_reorder(request: Request):
+def api_print_queue_reorder(request: Request, data=Depends(_json_body)):
     ip = get_real_ip(request); user_id = get_current_user(request)
     if not _can_manage_print_queue(ip, user_id, get_device_id(request)):
         raise HTTPException(403, "Изменение порядка доступно только администратору и сотрудникам ОДЗиМЛ")
-    data = await request.json()
     ids = data.get('ids') or []
     if not isinstance(ids, list) or not ids:
         raise HTTPException(400, "Пустой список")
@@ -7609,7 +7867,7 @@ def messages_page(request: Request):
 
 
 @app.post("/api/generate_vacancy_doc")
-async def api_generate_vacancy_doc(request: Request):
+def api_generate_vacancy_doc(request: Request, data=Depends(_json_body)):
     """Генерация заявления за свой счёт в формате .docx."""
     # Доступно всем пользователям сети (регистрация не требуется)
     try:
@@ -7620,7 +7878,6 @@ async def api_generate_vacancy_doc(request: Request):
     except ImportError:
         raise HTTPException(500, "python-docx не установлен. pip install python-docx")
 
-    data = await request.json()
     dir_title = data.get('dir_title', '')
     dir_name  = data.get('dir_name',  '')
     pos_title = data.get('pos_title', '')
@@ -7760,17 +8017,17 @@ async def api_generate_vacancy_doc(request: Request):
                     media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
 @app.get("/api/messages/quota")
-async def api_messages_quota(request: Request):
+def api_messages_quota(request: Request):
     ip=get_real_ip(request); device_id=get_device_id(request); user_id=get_current_user(request)
-    if not await run_in_threadpool(_is_registered_or_admin, ip, user_id, device_id): raise HTTPException(403)
+    if not _is_registered_or_admin(ip, user_id, device_id): raise HTTPException(403)
     unlimited=_is_quota_unlimited(ip); used=0 if unlimited else _quota_used_today(ip)
     return {"ok":True,"unlimited":unlimited,"used_bytes":used,"limit_bytes":MSG_QUOTA_BYTES,"used_mb":round(used/1024/1024,1),"limit_mb":512}
 
 @app.post("/api/messages/delete")
-async def api_messages_delete(request: Request):
+def api_messages_delete(request: Request, data=Depends(_json_body)):
     ip=get_real_ip(request); device_id=get_device_id(request); user_id=get_current_user(request)
-    if not await run_in_threadpool(_is_registered_or_admin, ip, user_id, device_id): raise HTTPException(403)
-    data=await request.json(); msg_id=data.get('msg_id')
+    if not _is_registered_or_admin(ip, user_id, device_id): raise HTTPException(403)
+    msg_id=data.get('msg_id')
     if not msg_id: raise HTTPException(400,"msg_id обязателен")
     db=_pg()
     try:
@@ -7837,17 +8094,21 @@ def api_messages_file(owner_ip: str, filename: str, request: Request):
 
 # ── LAYER PREFS ────────────────────────────────────────────
 @app.post("/api/layer_prefs/save")
-async def api_layer_prefs_save(request: Request):
-    ip=get_real_ip(request); data=await request.json(); now=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conn=_get_conn(); cur=conn.cursor()
-    cur.execute("INSERT INTO layer_prefs (ip,prefs_json,updated_at) VALUES (?,?,?) ON CONFLICT(ip) DO UPDATE SET prefs_json=excluded.prefs_json,updated_at=excluded.updated_at",
-                (ip,json.dumps(data),now))
-    conn.commit(); conn.close(); return {"ok":True}
+def api_layer_prefs_save(request: Request, data=Depends(_json_body)):
+    ip=get_real_ip(request); now=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    prefs=json.dumps(data)
+    if len(prefs) > 256*1024: raise HTTPException(413, "Слишком большие настройки слоёв")
+    with contextlib.closing(_get_conn()) as conn:
+        conn.execute("INSERT INTO layer_prefs (ip,prefs_json,updated_at) VALUES (?,?,?) ON CONFLICT(ip) DO UPDATE SET prefs_json=excluded.prefs_json,updated_at=excluded.updated_at",
+                     (ip,prefs,now))
+        conn.commit()
+    return {"ok":True}
 
 @app.get("/api/layer_prefs/load")
 def api_layer_prefs_load(request: Request):
-    ip=get_real_ip(request); conn=_get_conn(); cur=conn.cursor()
-    cur.execute("SELECT prefs_json FROM layer_prefs WHERE ip=?",(ip,)); row=cur.fetchone(); conn.close()
+    ip=get_real_ip(request)
+    with contextlib.closing(_get_conn()) as conn:
+        row=conn.execute("SELECT prefs_json FROM layer_prefs WHERE ip=?",(ip,)).fetchone()
     if row:
         try: return json.loads(row['prefs_json'])
         except: pass
@@ -7881,8 +8142,8 @@ async def api_tts(request: Request):
 
 # ── DZZ ORDER ──────────────────────────────────────────────
 @app.post("/api/dzz_order/save")
-async def api_dzz_order_save(request: Request):
-    ip=get_real_ip(request); data=await request.json()
+def api_dzz_order_save(request: Request, data=Depends(_json_body)):
+    ip=get_real_ip(request)
     tab_id=data.get('tabId','').strip(); year=str(data.get('year','')).strip(); key_order=data.get('keyOrder',[])
     if not tab_id or not year or not isinstance(key_order,list): raise HTTPException(400,"bad params")
     tab_year=f"{tab_id}_{year}"; now=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -7902,23 +8163,20 @@ def api_dzz_order_load(request: Request):
 # ── WEATHER ────────────────────────────────────────────────
 # Серверный кэш погоды: ключ → (data_dict, timestamp)
 # TTL = 1 час; не запрашиваем Open-Meteo повторно, пока кэш свежий.
-_weather_server_cache: dict = {}
 _WEATHER_SERVER_TTL = 3600   # секунд
-_weather_cache_lock = threading.Lock()
+_OPEN_METEO_URL = os.getenv("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast")  # для стенда подменяется моком
+# [v20.13] Был dict без лимита: любые координаты клиента росли в памяти бесконечно.
+# Ключ округляется до ~1 км — для погоды достаточно, попаданий в кэш больше.
+_weather_server_cache = _pk.TTLCache(maxsize=int(os.getenv("WEATHER_CACHE_MAX", "5000")), ttl=_WEATHER_SERVER_TTL)
 
 def _weather_cache_key(lat: float, lon: float) -> str:
-    return f"{round(lat, 4)},{round(lon, 4)}"
+    return f"{round(lat, 2)},{round(lon, 2)}"
 
 def _weather_cache_get(key: str):
-    with _weather_cache_lock:
-        entry = _weather_server_cache.get(key)
-        if entry and (time.time() - entry["ts"]) < _WEATHER_SERVER_TTL:
-            return entry["data"]
-    return None
+    return _weather_server_cache.get(key)
 
 def _weather_cache_put(key: str, data: dict):
-    with _weather_cache_lock:
-        _weather_server_cache[key] = {"data": data, "ts": time.time()}
+    _weather_server_cache.put(key, data)
 
 
 def _normalize_open_meteo(data: dict) -> dict:
@@ -7952,7 +8210,7 @@ async def api_weather(
         return JSONResponse(content=cached)
 
     url = (
-        "https://api.open-meteo.com/v1/forecast"
+        _OPEN_METEO_URL +
         f"?latitude={latitude}&longitude={longitude}"
         "&current=temperature_2m,windspeed_10m,winddirection_10m,weathercode"
         "&timezone=auto&forecast_days=1"
@@ -8019,7 +8277,7 @@ async def api_weather_batch(
         uc_lats = ",".join(str(lats[i]) for i in uncached_idx)
         uc_lons = ",".join(str(lons[i]) for i in uncached_idx)
         url = (
-            "https://api.open-meteo.com/v1/forecast"
+            _OPEN_METEO_URL +
             f"?latitude={uc_lats}&longitude={uc_lons}"
             "&current=temperature_2m,windspeed_10m,winddirection_10m,weathercode"
             "&timezone=auto&forecast_days=1"
@@ -8743,25 +9001,33 @@ def _get_arcgis_token():
     return None
 
 # ── SSE очередь синхронизации ───────────────────────────────────────────────
-_sync_subscribers: list = []
+_sync_subscribers: list = []      # элементы: (loop, asyncio.Queue)
 _sync_lock_sse = threading.Lock()
 
 def _broadcast_sync_event(event_type: str, entity_id: int, data: dict):
-    import asyncio
+    """Вызывается и из потоков threadpool (WFS-T, webhook): asyncio.Queue не
+    потокобезопасна, поэтому кладём через loop.call_soon_threadsafe."""
     payload = json.dumps({
         "type": event_type, "id": entity_id,
         "data": data, "source": "server",
         "ts": datetime.utcnow().isoformat(),
     })
+
+    def _put(q):
+        try:
+            q.put_nowait(payload)
+        except Exception:
+            pass  # очередь переполнена — клиент отстаёт, событие пропускаем
+
     with _sync_lock_sse:
         dead = []
-        for q in _sync_subscribers:
+        for loop, q in _sync_subscribers:
             try:
-                q.put_nowait(payload)
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            _sync_subscribers.remove(q)
+                loop.call_soon_threadsafe(_put, q)
+            except RuntimeError:  # loop закрыт
+                dead.append((loop, q))
+        for item in dead:
+            _sync_subscribers.remove(item)
 
 # ── Лог синхронизации ───────────────────────────────────────────────────────
 _sync_log: list = []
@@ -9216,12 +9482,13 @@ async def sync_sse_stream(request: Request):
     """
     import asyncio
     q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _sub = (asyncio.get_running_loop(), q)
     with _sync_lock_sse:
         # [SEC v16] каждое подключение держит корутину и очередь — без лимита
         # тысячи «вечных» соединений исчерпывали ресурсы процесса
         if len(_sync_subscribers) >= int(os.getenv("SSE_MAX_SUBSCRIBERS", "300")):
             raise HTTPException(503, "Слишком много подключений", headers={"Retry-After": "30"})
-        _sync_subscribers.append(q)
+        _sync_subscribers.append(_sub)
 
     async def event_generator():
         try:
@@ -9237,7 +9504,7 @@ async def sync_sse_stream(request: Request):
         finally:
             with _sync_lock_sse:
                 try:
-                    _sync_subscribers.remove(q)
+                    _sync_subscribers.remove(_sub)
                 except ValueError:
                     pass
 
@@ -9361,7 +9628,7 @@ async def pull_layer_from_arcgis(
 
 
 @app.post("/api/sync/webhook")
-async def arcgis_webhook(request: Request, db: Session = Depends(get_db)):
+def arcgis_webhook(request: Request, payload=Depends(_json_body_lenient), db: Session = Depends(get_db)):
     """
     Webhook — ArcGIS уведомляет геопортал об изменениях.
     ArcGIS Server Manager: Webhooks → Add → URL: http://192.168.12.97/api/sync/webhook
@@ -9370,10 +9637,6 @@ async def arcgis_webhook(request: Request, db: Session = Depends(get_db)):
     """
     if not _sh.webhook_secret_ok(request):
         raise HTTPException(401, "Неверный секрет webhook")
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
     if not isinstance(payload, dict):
         payload = {}
     layer_id = None
@@ -9403,13 +9666,12 @@ def _require_vector_editor(request: Request):
 
 
 @app.patch("/api/vector/{layer_id}/feature/{feature_index}")
-async def update_feature_geometry(
+def update_feature_geometry(
     layer_id: int, feature_index: int,
-    request: Request, db: Session = Depends(get_db),
+    request: Request, body=Depends(_json_body), db: Session = Depends(get_db),
     _editor=Depends(_require_vector_editor),
 ):
     """Обновляет геометрию/атрибуты объекта. Вызывается из OpenLayers и ArcPy."""
-    body = await request.json()
     row  = db.query(VectorLayer).filter(VectorLayer.id == layer_id).first()
     if not row:
         raise HTTPException(404, "Слой не найден")
@@ -9431,10 +9693,9 @@ async def update_feature_geometry(
 
 
 @app.post("/api/vector/{layer_id}/feature")
-async def add_feature(layer_id: int, request: Request, db: Session = Depends(get_db),
+def add_feature(layer_id: int, request: Request, body=Depends(_json_body), db: Session = Depends(get_db),
                       _editor=Depends(_require_vector_editor)):
     """Добавляет новый объект в слой."""
-    body = await request.json()
     row  = db.query(VectorLayer).filter(VectorLayer.id == layer_id).first()
     if not row:
         raise HTTPException(404, "Слой не найден")
@@ -9475,20 +9736,20 @@ def delete_feature(
 
 # ── MAINTENANCE ────────────────────────────────────────────
 @app.post("/api/maintenance/on")
-async def api_maintenance_on(_=Depends(require_admin)):
+def api_maintenance_on(_=Depends(require_admin)):
     with _maintenance_lock:
         _maintenance["active"]=True; _maintenance["since"]=datetime.now().strftime("%H:%M, %d.%m.%Y"); _maintenance["blocked_visits"]=0
     return {"ok":True,"active":True,"since":_maintenance["since"]}
 
 @app.post("/api/maintenance/off")
-async def api_maintenance_off(_=Depends(require_admin)):
+def api_maintenance_off(_=Depends(require_admin)):
     with _maintenance_lock: _maintenance.update({"active":False,"since":None,"blocked_visits":0})
     return {"ok":True,"active":False}
 
 import time
 
 @app.get("/api/maintenance/status")
-async def api_maintenance_status(_=Depends(require_admin)): return _maintenance.copy()
+def api_maintenance_status(_=Depends(require_admin)): return _maintenance.copy()
 
 @app.get("/maintenance", response_class=HTMLResponse)
 async def maintenance_page(request: Request):
@@ -9497,7 +9758,7 @@ async def maintenance_page(request: Request):
 # ── ADMIN PAGES ────────────────────────────────────────────
 @app.get("/admin/users", response_class=HTMLResponse)
 @app.get("/admin_users",  response_class=HTMLResponse)
-async def admin_users_page(request: Request, _=Depends(require_admin)):
+def admin_users_page(request: Request, _=Depends(require_admin)):
     # csrf_token — для <meta name="csrf-token">: им подписываются POST из консоли (напр. сезон оформления)
     _csrf = get_csrf_token(request)
     _resp = templates.TemplateResponse(request=request,name="admin_users.html",
@@ -9507,23 +9768,23 @@ async def admin_users_page(request: Request, _=Depends(require_admin)):
     return _inject_season_card(_resp, _csrf)
 
 @app.get("/frozen", response_class=HTMLResponse)
-async def frozen_page(request: Request):
+def frozen_page(request: Request):
     ip=get_real_ip(request)
     return templates.TemplateResponse(request=request,name="frozen.html",context={"ip":ip},status_code=403)
 
 @app.get("/banned", response_class=HTMLResponse)
-async def banned_page(request: Request):
+def banned_page(request: Request):
     ip=get_real_ip(request)
     return templates.TemplateResponse(request=request,name="blacklisted.html",context={"ip":ip},status_code=403)
 
 # ── TOKENS ADMIN ───────────────────────────────────────────
 @app.get("/api/admin/tokens")
-async def api_admin_tokens_list(_=Depends(require_admin)):
+def api_admin_tokens_list(_=Depends(require_admin)):
     token_auto_deactivate_expired(); return token_get_all()
 
 @app.post("/api/admin/users/quota_unlimited")
-async def api_admin_quota_unlimited(request: Request, _=Depends(require_admin)):
-    data=await request.json(); target_ip=data.get('ip','').strip(); unlimited=bool(data.get('unlimited',False))
+def api_admin_quota_unlimited(request: Request, data=Depends(_json_body), _=Depends(require_admin)):
+    target_ip=data.get('ip','').strip(); unlimited=bool(data.get('unlimited',False))
     if not target_ip: raise HTTPException(400,"ip обязателен")
     db = _pg()
     try:
@@ -9540,12 +9801,11 @@ async def api_admin_quota_unlimited(request: Request, _=Depends(require_admin)):
         db.close()
 
 @app.post("/api/admin/users/print_queue_perm")
-async def api_admin_print_queue_perm(request: Request, _=Depends(require_admin)):
+def api_admin_print_queue_perm(request: Request, data=Depends(_json_body), _=Depends(require_admin)):
     """Выдать/забрать право редактировать «Таксаторы печать» конкретному
     пользователю (по IP). Хранится в pg_users.can_edit_print_queue —
     в той же базе (PostgreSQL), откуда admin_users.html читает список
     пользователей, поэтому изменение видно сразу и переживает перезапуск."""
-    data = await request.json()
     target_ip = (data.get('ip') or '').strip()
     allowed = bool(data.get('allowed', False))
     if not target_ip:
@@ -10145,9 +10405,8 @@ def api_odz_staff_restore(sid: int, request: Request, db: Session = Depends(get_
 
 
 @app.post("/api/odziml/staff/reorder")
-async def api_odz_staff_reorder(request: Request, db: Session = Depends(get_db)):
+def api_odz_staff_reorder(request: Request, data=Depends(_json_body), db: Session = Depends(get_db)):
     _odz_require_edit(request)
-    data = await request.json()
     ids = data.get('ids') if isinstance(data, dict) else None
     if not isinstance(ids, list) or not ids or len(ids) > 500:
         raise HTTPException(400, "Пустой список")
@@ -10232,18 +10491,13 @@ def api_avatar_delete(request: Request):
     return {"ok": True}
 
 @app.post("/api/avatar/upload")
-async def api_avatar_upload(request: Request):
+def api_avatar_upload(request: Request, body=Depends(_json_body)):
     """
     Принимает base64-изображение от фронтенда (v18: уже кадрированное 512×512), сжимает до 384×384 через Pillow
     (решает 413 Request Entity Too Large — большой файл не уходит "как есть"),
     сохраняет JPEG в static/avatars/, записывает путь в колонку photo_url таблицы pg_users.
     """
     ip = get_real_ip(request)
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Неверный формат запроса")
 
     data_url = body.get("photo_data", "")
     if not data_url:
@@ -10417,15 +10671,11 @@ def api_profile_me(request: Request):
 
 
 @app.post("/api/profile/save")
-async def api_profile_save(request: Request):
+def api_profile_save(request: Request, body=Depends(_json_body)):
     ip = get_real_ip(request); user_id = get_current_user(request); device_id = get_device_id(request)
     if not _is_registered_or_admin(ip, user_id, device_id):
         raise HTTPException(403, "Нет доступа")
     verify_csrf(request)
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Неверный формат запроса")
     if not isinstance(body, dict):
         raise HTTPException(400, "Неверный формат запроса")
     db = _pg()

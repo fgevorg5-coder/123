@@ -397,16 +397,37 @@ def same_origin_request(request) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 class RateLimiter:
     """Скользящее окно per-key (IP + правило). Потокобезопасно, O(1) амортизированно,
-    число ключей ограничено (старые вытесняются) — нельзя «раздуть» память."""
+    число ключей ограничено (старые вытесняются) — нельзя «раздуть» память.
 
-    def __init__(self, max_keys: int = 50000):
+    Состояние в памяти процесса: при нескольких воркерах uvicorn/gunicorn лимит
+    действует на каждый воркер отдельно — задайте RATE_LIMIT_WORKERS=<число воркеров>,
+    тогда лимит правила делится на это число (итоговый ≈ заданному)."""
+
+    SWEEP_INTERVAL = 60.0
+
+    def __init__(self, max_keys: int = 50000, workers: Optional[int] = None):
         self._hits: dict = {}
         self._lock = threading.Lock()
         self._max_keys = max_keys
+        self._last_sweep = time.monotonic()
+        self._max_window = 0.0
+        self.workers = max(1, _env_int("RATE_LIMIT_WORKERS", 1) if workers is None else int(workers))
+
+    def _sweep(self, now: float) -> None:
+        """Раз в минуту (под локом) убирает ключи без свежих попаданий."""
+        self._last_sweep = now
+        edge = now - self._max_window
+        for k in [k for k, q in self._hits.items() if not q or q[-1] <= edge]:
+            del self._hits[k]
 
     def hit(self, key, limit: int, window: float, now: Optional[float] = None) -> tuple:
         now = time.monotonic() if now is None else now
+        limit = max(1, limit // self.workers)
         with self._lock:
+            if window > self._max_window:
+                self._max_window = window
+            if now - self._last_sweep >= self.SWEEP_INTERVAL:
+                self._sweep(now)
             q = self._hits.get(key)
             if q is None:
                 if len(self._hits) >= self._max_keys:
@@ -506,6 +527,7 @@ def default_body_limits() -> list:
 _BAD_METHODS = {"TRACE", "TRACK", "CONNECT", "DEBUG", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK", "SEARCH"}
 _UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 _HOST_RE = re.compile(r"^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]{1,253})(:[0-9]{1,5})?$")
+_HOT_PREFIXES = ("/static/", "/tiles/", "/geoserver_wms_proxy", "/wms", "/api/mbtiles/", "/uploads/")
 _RAW_BAD = re.compile(rb"(%00|\x00|\\|%5c|(^|/)(\.|%2e){2}(/|$|%2f|\?)|%2e%2e)", re.I)
 _PRIVATE_PREFIXES = ("/api/users/me", "/api/session/", "/api/messages/", "/api/admin/", "/api/tokens/",
                      "/api/download_token", "/api/activity/", "/login", "/api/ecp/", "/api/print_queue")
@@ -684,7 +706,9 @@ class HardeningASGI:
             log.warning("[sec] cross-site %s %s from %s origin=%r", method, path, ip, h.get("origin") or h.get("referer"))
             return await self._reject(send, 403, "csrf_origin", "Запрос с чужого сайта отклонён")
 
-        if self.rate_enabled and ip not in self.exempt_ips:
+        # горячие read-only пути: без скана правил частоты (тело у GET/HEAD и так не лимитируется)
+        hot = method in ("GET", "HEAD") and path.startswith(_HOT_PREFIXES)
+        if self.rate_enabled and not hot and ip not in self.exempt_ips:
             rule = self._rate_rule(method, path)
             if rule:
                 ok, retry = self.limiter.hit((ip, rule[2]), rule[0], rule[1])
