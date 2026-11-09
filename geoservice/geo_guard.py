@@ -479,6 +479,9 @@ class GeoGuardMiddleware:
                 log.warning(f"[geo_guard] BAN {ip} на {self.ban_seconds} с: массовые запросы данных (похоже на скрейпинг)")
             if len(self.strikes) > 10000:
                 self.strikes.clear()
+            if len(self.banned) > 5000:      # истёкшие баны снимались только при повторном визите IP
+                for k in [k for k, t in self.banned.items() if t < now]:
+                    del self.banned[k]
 
     def _is_banned(self, ip):
         until = self.banned.get(ip)
