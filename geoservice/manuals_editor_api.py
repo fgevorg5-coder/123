@@ -51,6 +51,7 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 VERSION = "20.10"
 MB = 1024 * 1024
@@ -403,30 +404,34 @@ def build_router(*, base_dir: str, require_admin: Optional[Callable[[Request], A
         raw = await request.body()
         if len(raw) > max_bytes + MB:
             raise HTTPException(413, f"Редакция больше {max_bytes // MB} МБ — уменьшите или удалите крупные иллюстрации")
-        try:
-            data = json.loads(raw.decode("utf-8") or "{}")
-        except (UnicodeDecodeError, ValueError):
-            raise HTTPException(400, "Ожидается JSON {html, title, source_ver, base_revision}")
-        if not isinstance(data, dict) or not isinstance(data.get("html"), str):
-            raise HTTPException(400, "Нет текста редакции (поле html)")
-        html = clean_html(data["html"])
-        if not re.sub(r"<[^>]+>|&nbsp;|\s", "", html) and "<img" not in html:
-            raise HTTPException(400, "Пустая редакция не сохраняется")
-        if len(html.encode("utf-8")) > max_bytes:
-            raise HTTPException(413, f"Редакция больше {max_bytes // MB} МБ — уменьшите или удалите крупные иллюстрации")
-        base = data.get("base_revision")
-        if base is not None:
+        def _process():
             try:
-                base = int(base)
-            except (TypeError, ValueError):
-                raise HTTPException(400, "base_revision должен быть числом")
-        rec = {"html": html, "title": str(data.get("title") or "")[:300],
-               "source_ver": str(data.get("source_ver") or "1")[:40], "by": str(who)[:80]}
-        try:
-            saved = store.save(fid, rec, base)
-        except Conflict as c:
-            raise HTTPException(409, f"Редакцию уже обновили в другом окне (сейчас редакция {c.current}). "
-                                     "Откройте актуальную и перенесите правки.")
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, ValueError):
+                raise HTTPException(400, "Ожидается JSON {html, title, source_ver, base_revision}")
+            if not isinstance(data, dict) or not isinstance(data.get("html"), str):
+                raise HTTPException(400, "Нет текста редакции (поле html)")
+            html = clean_html(data["html"])
+            if not re.sub(r"<[^>]+>|&nbsp;|\s", "", html) and "<img" not in html:
+                raise HTTPException(400, "Пустая редакция не сохраняется")
+            if len(html.encode("utf-8")) > max_bytes:
+                raise HTTPException(413, f"Редакция больше {max_bytes // MB} МБ — уменьшите или удалите крупные иллюстрации")
+            base = data.get("base_revision")
+            if base is not None:
+                try:
+                    base = int(base)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "base_revision должен быть числом")
+            rec = {"html": html, "title": str(data.get("title") or "")[:300],
+                   "source_ver": str(data.get("source_ver") or "1")[:40], "by": str(who)[:80]}
+            try:
+                saved = store.save(fid, rec, base)
+            except Conflict as c:
+                raise HTTPException(409, f"Редакцию уже обновили в другом окне (сейчас редакция {c.current}). "
+                                         "Откройте актуальную и перенесите правки.")
+            return html, saved
+
+        html, saved = await run_in_threadpool(_process)
         log(f"[manuals-editions] {fid}: сохранена редакция {saved['revision']} ({len(html)} символов)")
         return JSONResponse(public(saved, fid), headers=NO_STORE)
 

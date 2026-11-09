@@ -1549,6 +1549,7 @@ _http_session.mount('https://', _adapter)
 # Ключ: (url_без_параметра_time, args_str)  →  (bytes, content_type)
 # ----------------------------------------------------------
 import functools, collections
+import perf_kit as _pk  # [v20.13] TTL-кэш, single-flight, предохранители, троттлинг
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TILE CACHE — Redis-первый с LRU-fallback
@@ -1602,25 +1603,52 @@ _tile_cache: collections.OrderedDict = collections.OrderedDict()
 _tile_cache_lock = threading.Lock()
 
 
+# [v20.13] Redis-вызовы больше не делаются из event loop: при зависшем Redis
+# (socket_timeout=1) каждый тайл раньше «замораживал» весь сервер на 1-2 с.
+# Чтение — через threadpool (_tile_cache_aget), запись — fire-and-forget в
+# отдельном маленьком пуле; после 3 ошибок подряд Redis отключается на 30 с.
+_redis_breaker = _pk.CircuitBreaker("redis", threshold=3, cooldown=30.0)
+_redis_executor = _futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="redis")
+
+
+def _redis_available() -> bool:
+    return bool(_redis_ok and _redis_client) and _redis_breaker.allow()
+
+
 def _tile_cache_get(key: str):
-    """Читает тайл: LRU (в процессе, ~мкс) → Redis (один MGET).
-    [PERF] Раньше порядок был обратный: каждый хит делал ДВА синхронных
-    сетевых запроса в Redis прямо в event loop, даже если тайл уже лежал
-    в памяти процесса. Хит из Redis теперь «поднимается» в LRU."""
+    """Синхронное чтение ТОЛЬКО из LRU процесса (микросекунды, безопасно в loop)."""
     with _tile_cache_lock:
         hit = _tile_cache.get(key)
         if hit is not None:
             _tile_cache.move_to_end(key)
             return hit
-    if _redis_ok and _redis_client:
-        try:
-            data, ct = _redis_client.mget(f"tile:{key}", f"tile:ct:{key}")
-            if data is not None:
-                value = (data, (ct or b"image/png").decode())
-                _tile_lru_put(key, value)
-                return value
-        except Exception as _e:
-            logger.debug(f"[tile-cache] Redis get error: {_e}")
+    return None
+
+
+def _tile_cache_redis_get(key: str):
+    """Блокирующее чтение из Redis — вызывать только из потока."""
+    try:
+        data, ct = _redis_client.mget(f"tile:{key}", f"tile:ct:{key}")
+        _redis_breaker.record_success()
+    except Exception as _e:
+        if _redis_breaker.record_failure():
+            logger.warning(f"[tile-cache] Redis недоступен, отключён на {_redis_breaker.cooldown:.0f} с: {_e}")
+        return None
+    if data is None:
+        return None
+    value = (data, (ct or b"image/png").decode())
+    _tile_lru_put(key, value)
+    return value
+
+
+async def _tile_cache_aget(key: str):
+    """Читает тайл: LRU (в процессе) → Redis (в threadpool). Хит из Redis
+    поднимается в LRU."""
+    hit = _tile_cache_get(key)
+    if hit is not None:
+        return hit
+    if _redis_available():
+        return await run_in_threadpool(_tile_cache_redis_get, key)
     return None
 
 
@@ -1638,19 +1666,27 @@ def _tile_lru_put(key: str, value: tuple):
             _tile_cache_bytes -= len(ev[0]) if ev[0] else 0
 
 
+def _tile_cache_redis_put(key: str, content: bytes, ct: str):
+    try:
+        pipe = _redis_client.pipeline(transaction=False)
+        pipe.setex(f"tile:{key}",    _REDIS_TILE_TTL, content)
+        pipe.setex(f"tile:ct:{key}", _REDIS_TILE_TTL, ct.encode())
+        pipe.execute()
+        _redis_breaker.record_success()
+    except Exception as _e:
+        if _redis_breaker.record_failure():
+            logger.warning(f"[tile-cache] Redis недоступен, отключён на {_redis_breaker.cooldown:.0f} с: {_e}")
+
+
 def _tile_cache_put(key: str, value: tuple):
-    """Записывает тайл (bytes, content_type): Redis + LRU."""
+    """Записывает тайл (bytes, content_type): LRU сразу, Redis — в фоне."""
     content, ct = value
-    if _redis_ok and _redis_client:
-        try:
-            pipe = _redis_client.pipeline(transaction=False)
-            pipe.setex(f"tile:{key}",    _REDIS_TILE_TTL, content)
-            pipe.setex(f"tile:ct:{key}", _REDIS_TILE_TTL, ct.encode())
-            pipe.execute()
-        except Exception as _e:
-            logger.debug(f"[tile-cache] Redis set error: {_e}")
-    # Всегда пишем в LRU (быстрый хит в том же процессе)
     _tile_lru_put(key, value)
+    if _redis_available():
+        try:
+            _redis_executor.submit(_tile_cache_redis_put, key, content, ct)
+        except RuntimeError:
+            pass  # интерпретатор завершается
 
 
 def _tile_cache_flush_all() -> dict:
@@ -2225,26 +2261,28 @@ def load_leshoz_data():
     global _leshoz_gdf_cache
     if _leshoz_gdf_cache is not None:
         return _leshoz_gdf_cache, None
+    # [v20.13] Загрузка целиком под замком: раньше замок закрывал только проверку,
+    # и при холодном старте N потоков читали SHP одновременно (пик RAM × N).
     with _leshoz_cache_lock:
         if _leshoz_gdf_cache is not None:
             return _leshoz_gdf_cache, None
-    shp_files = glob.glob(os.path.join(SHP_FOLDER, '*.shp'))
-    if not shp_files:
-        return None, "Файл .shp не найден в папке shp_leshoz"
-    shp_path = shp_files[0]
-    try:
+        shp_files = glob.glob(os.path.join(SHP_FOLDER, '*.shp'))
+        if not shp_files:
+            return None, "Файл .shp не найден в папке shp_leshoz"
+        shp_path = shp_files[0]
         try:
-            gdf = gpd.read_file(shp_path, encoding='cp1251')
-        except Exception:
-            gdf = gpd.read_file(shp_path, encoding='utf-8')
-        gdf_processed, error = process_forestry_gdf(gdf)
-        if error:
-            return None, error
-        _leshoz_gdf_cache = gdf_processed
-        return gdf_processed, None
-    except Exception as e:
-        logger.error(f"SHP Load Error: {e}")
-        return None, str(e)
+            try:
+                gdf = gpd.read_file(shp_path, encoding='cp1251')
+            except Exception:
+                gdf = gpd.read_file(shp_path, encoding='utf-8')
+            gdf_processed, error = process_forestry_gdf(gdf)
+            if error:
+                return None, error
+            _leshoz_gdf_cache = gdf_processed
+            return gdf_processed, None
+        except Exception as e:
+            logger.error(f"SHP Load Error: {e}")
+            return None, str(e)
 
 
 # ==========================================
@@ -2861,7 +2899,7 @@ async def api_zones_boundaries(request: Request):
 
 _cb_cache_body: bytes = b""
 _cb_cache_etag: str   = ""
-_cb_lock = threading.Lock()
+_cb_lock = _asyncio.Lock()  # [v20.13] был threading.Lock поперёк await — второй запрос намертво вешал event loop
 
 
 def _build_country_boundary() -> bytes:
@@ -2921,7 +2959,7 @@ async def api_country_boundary(request: Request):
     global _cb_cache_body, _cb_cache_etag
 
     if not _cb_cache_body:
-        with _cb_lock:
+        async with _cb_lock:
             if not _cb_cache_body:
                 try:
                     _cb_cache_body = await run_in_threadpool(_build_country_boundary)
@@ -3351,7 +3389,7 @@ async def _geoserver_wms_proxy_impl(request: Request):
 
     # 1. Python in-memory / Redis кэш — мгновенный ответ без семафора
     if not _is_feature_info:
-        cached = _tile_cache_get(cache_key)
+        cached = await _tile_cache_aget(cache_key)
         if cached:
             content, ct = cached
             return _tile_ok_response(request, content, ct, _resp_headers)
@@ -3411,7 +3449,7 @@ async def _geoserver_wms_proxy_impl(request: Request):
     async with _semaphore:
         # Повторная проверка кэша внутри семафора (другой воркер мог уже заполнить)
         if not _is_feature_info:
-            cached = _tile_cache_get(cache_key)
+            cached = await _tile_cache_aget(cache_key)
             if cached:
                 content, ct = cached
                 return _tile_ok_response(request, content, ct, _resp_headers)
@@ -3595,7 +3633,7 @@ async def api_wms_seed(request: Request):
             f"{k}={_sq(_suq(str(v)), safe='')}" for k, v in sorted(params.items())
         )
         # Пропускаем если уже в кэше
-        if _tile_cache_get(_cache_key):
+        if await _tile_cache_aget(_cache_key):
             return
 
         # bounds — быстрый семафор; cog — медленный
@@ -3603,7 +3641,7 @@ async def api_wms_seed(request: Request):
         _sem = _gs_bounds_semaphore if _is_bounds_layer else _gs_cog_semaphore
 
         async with _sem:
-            if _tile_cache_get(_cache_key):
+            if await _tile_cache_aget(_cache_key):
                 return
             try:
                 _p = params.copy()
@@ -6229,7 +6267,7 @@ async def proxy_dzz_tile(request: Request, z: int, y: int, x: int):
     if not (0 <= z <= 22 and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
         return _dzz_empty()
     key = f"dzz:{z}/{y}/{x}"
-    hit = _tile_cache_get(key)
+    hit = await _tile_cache_aget(key)
     if hit:
         return _tile_ok_response(request, hit[0], hit[1], _DZZ_TILE_HEADERS)
     fut = _dzz_inflight.get(key)
@@ -6300,7 +6338,7 @@ async def geoserver_pbf_proxy(request: Request, layer: str, z: int, x: int, y: i
     if not (0 <= z <= 22 and 0 <= x < (1 << z) and 0 <= y < (1 << z)) or len(layer) > 200:
         return Response(status_code=400)
     key = f"pbf:{layer}:{z}/{x}/{y}"
-    hit = _tile_cache_get(key)
+    hit = await _tile_cache_aget(key)
     if hit:
         return _tile_ok_response(request, hit[0], hit[1], _TILE_RESPONSE_HEADERS)
     try:
