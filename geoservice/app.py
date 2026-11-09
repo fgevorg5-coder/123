@@ -2451,17 +2451,7 @@ def token_get_all():
 # ==========================================
 # 14. DOWNLOAD TOKENS (v2)
 # ==========================================
-_dl_tokens2: dict = {}
-_dl_lock2 = threading.Lock()
-_DL_TTL2  = 600  # 10 минут
-
-
-def _dl_cleanup2():
-    now = time.time()
-    with _dl_lock2:
-        dead = [k for k, v in _dl_tokens2.items() if v['expires'] < now]
-        for k in dead:
-            del _dl_tokens2[k]
+# [v20.13] Реализация — ниже, в блоке «DL TOKENS v2» (SQLite, общая для воркеров).
 
 
 # ==========================================
@@ -3080,6 +3070,19 @@ _gs_basemap_semaphore = _asyncio.Semaphore(6)
 # Обратная совместимость: старый код ссылается на _gs_wms_semaphore
 _gs_wms_semaphore = _gs_cog_semaphore
 
+# [v20.13] Общие адаптивные «ворота» к внутреннему GeoServer. Семафоры выше дают
+# суммарно до 40 одновременных запросов, а control-flow GeoServer пропускает с
+# одного IP меньше — остальные получали 429, ждали секунду и повторяли, занимая
+# слоты. Ворота сами находят реальный потолок: при 429 сужаются, при успехах растут.
+# Стартовое значение — GEOSERVER_MAX_CONCURRENT (по умолчанию 12). Если в
+# controlflow.properties GeoServer стоит, например, ip=6 — поставьте 6 и там, и здесь.
+# WORKERS — число процессов uvicorn (--workers N): лимит делится между ними, т.к. GeoServer
+# видит все воркеры как один IP. Ворота всё равно подстроятся сами, но стартуют ближе к правде.
+_WORKERS = max(1, int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")) or 1))
+_gs_gate = _pk.AdaptiveGate("geoserver",
+                            initial=max(2, int(os.getenv("GEOSERVER_MAX_CONCURRENT", "12")) // _WORKERS),
+                            min_limit=1, max_limit=max(4, 40 // _WORKERS))
+
 # Выделенный пул потоков для тайловых запросов.
 # 40 потоков: bounds 24 + COG 8 + мозаика 2 + подложка ДЗЗ 6 = 40 одновременных HTTP.
 # [FIX] Было 32 — ровно под bounds+COG. После появления отдельного пула подложки
@@ -3567,11 +3570,19 @@ async def _geoserver_wms_proxy_impl(request: Request):
             _max_attempts = 1 if _is_bounds else (2 if _is_vector else 3)
 
             resp = None
+            _use_gate = target in ("GEOSERVER", "GEOSERVER_EXT")
             for _attempt in range(_max_attempts):
                 try:
-                    resp = await _asyncio.get_running_loop().run_in_executor(
-                        _tile_executor, _fetch_tile, _base_timeout
-                    )
+                    if _use_gate:
+                        async with _gs_gate:
+                            resp = await _asyncio.get_running_loop().run_in_executor(
+                                _tile_executor, _fetch_tile, _base_timeout
+                            )
+                        _gs_gate.report(resp.status_code == 429)
+                    else:
+                        resp = await _asyncio.get_running_loop().run_in_executor(
+                            _tile_executor, _fetch_tile, _base_timeout
+                        )
                 except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as _te:
                     # FIX: раньше первый же таймаут COG-тайла улетал в общий
                     # except ниже и мгновенно отдавался как "успешный" пустой
@@ -3592,7 +3603,7 @@ async def _geoserver_wms_proxy_impl(request: Request):
                         retry_after = min(3, max(0, int(resp.headers.get("Retry-After", 1 + _attempt))))
                     except ValueError:  # Retry-After в формате HTTP-даты
                         retry_after = 1 + _attempt
-                    logger.warning(f"geoserver_wms_proxy: 429 от GeoServer, ждём {retry_after}s (попытка {_attempt+1}/{_max_attempts})")
+                    logger.warning(f"geoserver_wms_proxy: 429 от GeoServer, ждём {retry_after}s (попытка {_attempt+1}/{_max_attempts}); лимит ворот → {_gs_gate.limit}")
                     await _asyncio.sleep(retry_after)
                     continue
                 break
@@ -3746,7 +3757,9 @@ async def api_wms_seed(request: Request):
                 _p = params.copy()
                 def _fetch():
                     return _tile_session.get(gs_ext_url, params=_p, timeout=15)
-                resp = await _asyncio.get_running_loop().run_in_executor(_tile_executor, _fetch)
+                async with _gs_gate:
+                    resp = await _asyncio.get_running_loop().run_in_executor(_tile_executor, _fetch)
+                _gs_gate.report(resp.status_code == 429)
                 if resp.status_code == 200 and resp.content:
                     _tile_cache_put(_cache_key, (resp.content, resp.headers.get("Content-Type", "image/png")))
             except Exception as _se:
@@ -4638,13 +4651,72 @@ def _attach_dir_for_ip(ip):
     d = os.path.join(MSG_ATTACH_FOLDER, safe); os.makedirs(d, exist_ok=True); return d
 
 # ══ DL TOKENS v2 ════════════════════════════════════════════════════
-_dl_tokens2 = {}; _dl_lock2 = threading.Lock(); _DL_TTL2 = 600
+# [v20.13] Одноразовые токены скачивания — в SQLite users.db, а не в словаре процесса:
+# при `uvicorn --workers 4` токен, выданный одним воркером, в трёх других не находился
+# («Токен не найден» у ~75 % скачиваний). SQLite в WAL общий для всех процессов.
+_DL_TTL2 = 600
+_dl_table_ready = False
+_dl_table_lock = threading.Lock()
+
+
+def _dl_ensure_table():
+    global _dl_table_ready
+    if _dl_table_ready:
+        return
+    with _dl_table_lock:
+        if _dl_table_ready:
+            return
+        with contextlib.closing(_get_conn()) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS dl_tokens (
+                token TEXT PRIMARY KEY, path TEXT NOT NULL, filename TEXT NOT NULL,
+                label TEXT, expires REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0)""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_dl_tokens_expires ON dl_tokens(expires)")
+            conn.commit()
+        _dl_table_ready = True
+
+
+_dl_cleanup_throttle = _pk.Throttle(interval=60.0, maxsize=1)
+
 
 def _dl_cleanup2():
+    """Удаляет просроченные токены — не чаще раза в минуту на процесс."""
+    _dl_ensure_table()
+    if not _dl_cleanup_throttle.should("dl"):
+        return
+    with contextlib.closing(_get_conn()) as conn:
+        conn.execute("DELETE FROM dl_tokens WHERE expires < ?", (time.time(),))
+        conn.commit()
+
+
+def _dl_token_issue(abs_path: str, filename: str, label: str) -> str:
+    _dl_ensure_table()
+    token = str(_uuid_mod.uuid4())
+    with contextlib.closing(_get_conn()) as conn:
+        conn.execute("INSERT INTO dl_tokens (token, path, filename, label, expires, used) VALUES (?,?,?,?,?,0)",
+                     (token, abs_path, filename, label, time.time() + _DL_TTL2))
+        conn.commit()
+    return token
+
+
+def _dl_token_consume(token: str) -> dict:
+    """Атомарно помечает токен использованным; HTTPException при любом отказе."""
+    _dl_ensure_table()
     now = time.time()
-    with _dl_lock2:
-        dead = [k for k,v in _dl_tokens2.items() if v['expires']<now]
-        for k in dead: del _dl_tokens2[k]
+    with contextlib.closing(_get_conn()) as conn:
+        row = conn.execute("SELECT path, filename, label, expires, used FROM dl_tokens WHERE token=?",
+                           (token,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Токен не найден")
+        if row["used"]:
+            raise HTTPException(410, "Токен уже использован")
+        if row["expires"] < now:
+            conn.execute("DELETE FROM dl_tokens WHERE token=?", (token,)); conn.commit()
+            raise HTTPException(410, "Токен просрочен")
+        cur = conn.execute("UPDATE dl_tokens SET used=1 WHERE token=? AND used=0", (token,))
+        conn.commit()
+        if cur.rowcount != 1:  # параллельный запрос успел первым
+            raise HTTPException(410, "Токен уже использован")
+        return {"path": row["path"], "filename": row["filename"], "label": row["label"]}
 
 def _dl_resolve_file(file_path: str):
     """
@@ -6756,28 +6828,14 @@ def api_download_token(request: Request, data=Depends(_json_body)):
         logger.warning(f"[download_token] файл не найден: '{file_path}'")
         raise HTTPException(404, f"Файл не найден на сервере: {label}")
 
-    token = str(_uuid_mod.uuid4())
-    with _dl_lock2:
-        _dl_tokens2[token] = {
-            "path": abs_path, "filename": filename,
-            "label": label, "expires": time.time() + _DL_TTL2, "used": False,
-        }
+    token = _dl_token_issue(abs_path, filename, label)
     logger.info(f"[download_token] {token[:8]}… => {filename}")
     return {"token": token}
 
 @app.get("/api/download_file")
 def api_download_file_v2(request: Request, token: str = Query(...)):
     _dl_cleanup2()
-    with _dl_lock2:
-        entry = _dl_tokens2.get(token)
-        if not entry:
-            raise HTTPException(404, "Токен не найден")
-        if entry["used"]:
-            raise HTTPException(410, "Токен уже использован")
-        if entry["expires"] < time.time():
-            del _dl_tokens2[token]
-            raise HTTPException(410, "Токен просрочен")
-        entry["used"] = True
+    entry = _dl_token_consume(token)
 
     abs_path = entry["path"]
     filename = entry["filename"]
@@ -11548,6 +11606,22 @@ app.add_middleware(_sh.HardeningASGI, trusted_proxies=_TRUSTED_PROXY_IPS,
 def api_admin_security_stats(_admin=Depends(require_admin)):
     """[SEC v16] Сколько атак/нарушений отсечено с момента запуска (по причинам)."""
     return JSONResponse({"blocked": _sh.stats()}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/admin/perf/stats")
+def api_admin_perf_stats(_admin=Depends(require_admin)):
+    """[v20.13] Состояние ворот к GeoServer, предохранителя Redis, кэшей — для диагностики лагов."""
+    with _tile_cache_lock:
+        _lru = {"entries": len(_tile_cache), "mb": round(_tile_cache_bytes / 1048576, 1)}
+    return JSONResponse({
+        "geoserver_gate": _gs_gate.state(),
+        "redis": _redis_breaker.state(),
+        "tile_lru": _lru,
+        "raster_inflight": len(_raster_inflight),
+        "raster_empty_cache": _raster_empty_cache.stats(),
+        "geocode_cache": _geocode_cache.stats(),
+        "weather_cache": _weather_server_cache.stats(),
+    }, headers={"Cache-Control": "no-store"})
 
 
 # [SEC v9] Самый внешний слой: пропуск геосервиса, фильтр WMS/WFS, лимиты, авто-бан.

@@ -57,6 +57,26 @@ def test_no_store_headers():
     assert h["Cache-Control"].startswith("no-store") and h["X-Accel-Expires"] == "0"
 
 
+def test_adaptive_gate_aimd():
+    async def go():
+        g = pk.AdaptiveGate("t", initial=4, min_limit=2, max_limit=6, grow_interval=0.0)
+        peak = [0]
+        async def one(throttle):
+            async with g:
+                peak[0] = max(peak[0], g.active); await asyncio.sleep(0.005)
+            g.report(throttle)
+        await asyncio.gather(*[one(False) for _ in range(20)])
+        assert peak[0] <= 6 and g.waits > 0            # не выше max_limit, очередь была
+        assert g.limit > 4                              # успехи расширили ворота
+        lim = g.limit
+        g.report(True)
+        assert g.limit == max(2, int(lim * 0.7))        # 429 сужает ×0.7
+        for _ in range(10):
+            g._last_throttle = 0.0; g.report(True)   # разнесённые по времени 429
+        assert g.limit == 2                             # не ниже min_limit
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -2,7 +2,8 @@
 # Локальный нагрузочный стенд геосервиса.
 #   tests/load/run_stand.sh up      — мок GeoServer/Open-Meteo (9090) + сервис (5002)
 #   tests/load/run_stand.sh down    — остановить
-#   tests/load/run_stand.sh base    — дополнительно поднять исходную версию (git HEAD~/baseline) на 5003
+#   tests/load/run_stand.sh base    — дополнительно поднять исходную версию v20.12 на 5003
+#   Переменные: MOCK_ARGS="--max-concurrent 6" (control-flow мока), APP_ENV="WORKERS=4" (env сервиса), APP_WORKERS=4 (воркеры uvicorn)
 # Требует: PostGIS (БД forest), .venv с зависимостями, geoservice/.env, фикстуры make_fixtures.py.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -17,10 +18,10 @@ start_mock() {
       --latency-ms "$MOCK_LAT" --jitter-ms 20 ${MOCK_ARGS:-} >/tmp/mockgs.log 2>&1 &)
 }
 
-start_app() {  # $1 = каталог geoservice, $2 = порт
+start_app() {  # $1 = каталог geoservice, $2 = порт; APP_ENV — доп. переменные сервиса ("A=1 B=2")
   (cd "$1" && . "$VENV" && \
-   GEOSERVER_BASE_URL=http://127.0.0.1:9090/geoserver OPEN_METEO_URL=http://127.0.0.1:9090/v1/forecast \
-   PYTHONPATH="$STUBS" nohup python -m uvicorn app:app --host 127.0.0.1 --port "$2" --workers 1 \
+   env GEOSERVER_BASE_URL=http://127.0.0.1:9090/geoserver OPEN_METEO_URL=http://127.0.0.1:9090/v1/forecast \
+   ${APP_ENV:-} PYTHONPATH="$STUBS" nohup python -m uvicorn app:app --host 127.0.0.1 --port "$2" --workers "${APP_WORKERS:-1}" \
      --http httptools --limit-concurrency 4096 --log-level warning >"/tmp/app$2.log" 2>&1 &)
 }
 

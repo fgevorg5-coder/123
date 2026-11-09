@@ -411,7 +411,7 @@ class RateLimiter:
         self._max_keys = max_keys
         self._last_sweep = time.monotonic()
         self._max_window = 0.0
-        self.workers = max(1, _env_int("RATE_LIMIT_WORKERS", 1) if workers is None else int(workers))
+        self.workers = max(1, (_env_int("RATE_LIMIT_WORKERS", 0) or _env_int("WORKERS", 1)) if workers is None else int(workers))
 
     def _sweep(self, now: float) -> None:
         """Раз в минуту (под локом) убирает ключи без свежих попаданий."""

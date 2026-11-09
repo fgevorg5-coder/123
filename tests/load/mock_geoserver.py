@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from PIL import Image
 
-CFG = {"latency_ms": 40.0, "jitter_ms": 10.0, "fail_rate": 0.0, "slow_every": 0, "slow_s": 5.0}
+CFG = {"latency_ms": 40.0, "jitter_ms": 10.0, "fail_rate": 0.0, "slow_every": 0, "slow_s": 5.0, "max_concurrent": 0}
 STATS = {"total": 0, "routes": {}, "in_flight": 0, "in_flight_max": 0, "failed": 0, "slow": 0}
 _png_cache = {}
 app = FastAPI(title="mock-geoserver")
@@ -48,6 +48,10 @@ async def chaos(request: Request, call_next):
     STATS["in_flight"] += 1
     STATS["in_flight_max"] = max(STATS["in_flight_max"], STATS["in_flight"])
     try:
+        # control-flow GeoServer: сверх лимита одновременных запросов — 429 сразу
+        if CFG["max_concurrent"] and path.startswith("/geoserver") and STATS["in_flight"] > CFG["max_concurrent"]:
+            STATS["throttled"] = STATS.get("throttled", 0) + 1
+            return Response("Too many requests", status_code=429, headers={"Retry-After": "1"})
         await asyncio.sleep((CFG["latency_ms"] + random.uniform(0, CFG["jitter_ms"])) / 1000)
         if CFG["slow_every"] and n % CFG["slow_every"] == 0:
             STATS["slow"] += 1
@@ -131,9 +135,12 @@ def main():
     p.add_argument("--latency-ms", type=float, default=float(e("MOCK_GS_LATENCY_MS", 40)))
     p.add_argument("--jitter-ms", type=float, default=float(e("MOCK_GS_JITTER_MS", 10)))
     p.add_argument("--fail-rate", type=float, default=float(e("MOCK_GS_FAIL_RATE", 0)))
+    p.add_argument("--max-concurrent", type=int, default=int(e("MOCK_GS_MAX_CONCURRENT", 0)),
+                   help="эмуляция control-flow GeoServer: сверх N одновременных запросов — 429 (0 = выкл)")
     p.add_argument("--slow-every", type=int, default=int(e("MOCK_GS_SLOW_EVERY", 0)))
     a = p.parse_args()
-    CFG.update(latency_ms=a.latency_ms, jitter_ms=a.jitter_ms, fail_rate=a.fail_rate, slow_every=a.slow_every)
+    CFG.update(latency_ms=a.latency_ms, jitter_ms=a.jitter_ms, fail_rate=a.fail_rate, slow_every=a.slow_every,
+               max_concurrent=a.max_concurrent)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
 

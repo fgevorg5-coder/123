@@ -222,6 +222,89 @@ class Throttle:
             self._last.pop(key, None)
 
 
+class AdaptiveGate:
+    """Адаптивный лимит одновременных запросов к внешнему сервису (AIMD).
+
+    GeoServer с control-flow отвечает 429, когда с одного IP идёт больше N
+    запросов сразу; N заранее неизвестен и меняется с настройками сервера.
+    Ворота начинают с `initial`, при 429 сужаются (×0.7), после `limit`
+    успешных ответов подряд расширяются на 1 — выходят на реальный потолок
+    без ручной подстройки. Только для asyncio-кода одного event loop.
+
+        async with gate:            # ждёт свободный слот
+            resp = await fetch()
+        gate.report(resp.status_code == 429)
+    """
+
+    __slots__ = ("name", "limit", "min_limit", "max_limit", "active", "_ok_streak",
+                 "_cond", "throttled", "waits", "grow_interval", "_last_grow", "_last_throttle")
+
+    def __init__(self, name: str = "", initial: int = 12, min_limit: int = 2, max_limit: int = 64,
+                 grow_interval: float = 10.0):
+        self.name = name
+        self.grow_interval = float(grow_interval)  # расти не чаще раза в N с: каждая проба вверх стоит один 429
+        self._last_grow = 0.0
+        self._last_throttle = 0.0
+        self.limit = max(min_limit, int(initial))
+        self.min_limit = max(1, int(min_limit))
+        self.max_limit = max(self.limit, int(max_limit))
+        self.active = 0
+        self._ok_streak = 0
+        self._cond: Optional[asyncio.Condition] = None
+        self.throttled = 0   # сколько раз сервер ответил 429
+        self.waits = 0       # сколько запросов ждали слот
+
+    def _c(self) -> asyncio.Condition:
+        if self._cond is None:
+            self._cond = asyncio.Condition()
+        return self._cond
+
+    async def __aenter__(self):
+        c = self._c()
+        async with c:
+            if self.active >= self.limit:
+                self.waits += 1
+            while self.active >= self.limit:
+                await c.wait()
+            self.active += 1
+        return self
+
+    async def __aexit__(self, *exc):
+        c = self._c()
+        async with c:
+            self.active -= 1
+            c.notify()
+
+    def report(self, throttled: bool) -> None:
+        """Сообщить результат запроса; вызывать после выхода из контекста."""
+        now = time.monotonic()
+        if throttled:
+            self.throttled += 1
+            self._ok_streak = 0
+            if now - self._last_throttle > 0.5:  # пачка 429 за полсекунды — одно событие, а не каскад ×0.7
+                self.limit = max(self.min_limit, int(self.limit * 0.7))
+            self._last_throttle = now
+        else:
+            self._ok_streak += 1
+            if (self._ok_streak >= self.limit and self.limit < self.max_limit
+                    and now - self._last_grow >= self.grow_interval):
+                self.limit += 1
+                self._ok_streak = 0
+                self._last_grow = now
+                if self._cond is not None and self._cond._waiters:  # noqa: SLF001 — разбудить ожидающих
+                    asyncio.get_running_loop().call_soon(self._notify_one)
+
+    def _notify_one(self):
+        async def _n():
+            async with self._cond:
+                self._cond.notify()
+        asyncio.ensure_future(_n())
+
+    def state(self) -> dict:
+        return {"name": self.name, "limit": self.limit, "active": self.active,
+                "throttled": self.throttled, "waits": self.waits}
+
+
 def no_store(base: Optional[dict] = None) -> dict:
     """Заголовки для ответов-ошибок тайлов: браузер, nginx и Redis их не кэшируют.
     Передаваемые `base` заголовки сохраняются, кроме кэширующих."""
@@ -233,4 +316,4 @@ def no_store(base: Optional[dict] = None) -> dict:
     return h
 
 
-__all__ = ["TTLCache", "SingleFlight", "CircuitBreaker", "Throttle", "no_store"]
+__all__ = ["TTLCache", "SingleFlight", "CircuitBreaker", "Throttle", "AdaptiveGate", "no_store"]
