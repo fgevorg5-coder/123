@@ -1,0 +1,7 @@
+postgres:
+  connection_string: postgresql://postgres:12345@host.docker.internal:5432/forest
+  default_srid: 32636
+  auto_publish:
+    from_schemas:
+      - public
+      - vectors
