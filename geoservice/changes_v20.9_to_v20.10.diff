@@ -1,0 +1,1005 @@
+--- v20.9/app.py
++++ v20.10/app.py
+@@ -11419,6 +11419,27 @@
+     logger=logger,
+ ))
+ 
++# [v20.10] Веб-редакции методичек (manuals_editor_api.py): редактор на /manuals публикует правки
++# отдельными редакциями (исходный Word/PDF не меняется), история и восстановление. Читать — всем,
++# сохранять — администратору (доп. пароль + CSRF). Хранение: instance/manuals_editions/.
++# Без модуля страница пишет «сервер редакций не подключён» — чтение при этом работает.
++try:
++    from manuals_editor_api import build_router as _build_manuals_editor_router
++except ImportError as _e:
++    _build_manuals_editor_router = None
++    logger.warning("manuals_editor_api.py не найден рядом с app.py — редактор методичек только для чтения (%s)", _e)
++if _build_manuals_editor_router is not None:
++    try:
++        app.include_router(_build_manuals_editor_router(
++            base_dir=BASE_DIR,
++            require_admin=require_admin,
++            verify_csrf=verify_csrf,
++            logger=logger,
++        ))
++        logger.info("✅ Редактор методичек (manuals_editor_api) подключён: /api/manuals-editions")
++    except Exception as _e:                       # не мешаем запуску портала (например, нет прав на instance/)
++        logger.exception("Редактор методичек не подключён: %s", _e)
++
+ # ==========================================
+ # 3D-РЕЖИМ ЛЕСХОЗОВ (forest3d_api.py) — кнопка «ВИД 2D/3D» на карте
+ # ==========================================
+--- v20.9/lesolidar_bridge.py
++++ v20.10/lesolidar_bridge.py
+@@ -19,6 +19,10 @@
+   LESOLIDAR_PYTHON   — интерпретатор Python 3.11 с пакетом lesolidar (альтернатива exe,
+                        например на Linux), LESOLIDAR_PATH — каталог, где лежит пакет;
+   <BASE_DIR>/tools/LesoLidar/LesoLidar.exe, <BASE_DIR>/LesoLidar/LesoLidar.exe — по умолчанию.
++  [v20.10] Ищется и в «двойной» папке после распаковки (tools/LesoLidar/LesoLidar/LesoLidar.exe,
++  tools/LesoLidar*/…/LesoLidar.exe), рядом с папкой приложения; LESOLIDAR_EXE может указывать на папку,
++  кавычки в пути убираются, .env перечитывается. Пока обработчик не найден, /caps проверяет заново
++  (не чаще раза в 3 с) — после копирования программы перезапуск не нужен, кнопка «Проверить снова».
+ Прочее: LESOLIDAR_WORKDIR (instance/lesolidar), LESOLIDAR_MAX_UPLOAD_GB (20),
+ LESOLIDAR_MAX_JOBS (1 — одновременно), LESOLIDAR_TIMEOUT_MIN (360), LESOLIDAR_KEEP_JOBS (200).
+ 
+@@ -37,6 +41,7 @@
+ import struct
+ import subprocess
+ import threading
++import time
+ import uuid
+ import zipfile
+ from pathlib import Path
+@@ -311,18 +316,80 @@
+         self.pkg_path: Optional[Path] = None
+         self.detect()
+ 
++    # [v20.10] значения LESOLIDAR_EXE: сначала .env рядом с app.py (перечитывается при каждой проверке —
++    # исправили .env, нажали «Проверить снова», перезапуск не нужен), затем переменная окружения
++    def _env_values(self) -> List[str]:
++        raw: List[str] = []
++        try:
++            for line in (self.base_dir / ".env").read_text(encoding="utf-8-sig", errors="replace").splitlines():
++                s = line.strip()
++                if s.startswith("export "):
++                    s = s[7:].lstrip()
++                if "=" in s and s.split("=", 1)[0].strip() == "LESOLIDAR_EXE":
++                    raw.append(s.split("=", 1)[1].split(" #", 1)[0])
++        except OSError:
++            pass
++        raw = raw[-1:]                                       # как в python-dotenv: действует последняя строка
++        raw.append(os.environ.get("LESOLIDAR_EXE") or "")
++        out: List[str] = []
++        for v in raw:
++            v = v.strip().strip('"').strip("'").strip()
++            v = os.path.expandvars(os.path.expanduser(v)) if v else ""
++            if v and v not in out:
++                out.append(v)
++        return out
++
++    @staticmethod
++    def _exe_in(p: Path) -> List[Path]:
++        # папка (или «двойная» папка после распаковки ZIP) → LesoLidar.exe внутри
++        return [p / "LesoLidar.exe", p / "LesoLidar" / "LesoLidar.exe"]
++
+     def detect(self) -> None:
+         self.exe, self.python, self.pkg_path = None, None, None
+-        cand = []
+-        if os.environ.get("LESOLIDAR_EXE"):
+-            cand.append(Path(os.environ["LESOLIDAR_EXE"]))
++        self.checked: List[str] = []
++        env_values = self._env_values()
++        self._env_seen = list(env_values)
++        self.env_value = env_values[0] if env_values else ""
++        self._detect_at = time.time()
++        cand: List[Path] = []
++        for ev in env_values:
++            p = Path(ev)
++            cand += self._exe_in(p) if (p.is_dir() or not p.suffix) else [p]
+         if not os.environ.get("LESOLIDAR_PYTHON"):
+-            for sub in ("tools/LesoLidar/LesoLidar.exe", "LesoLidar/LesoLidar.exe", "tools/LesoLidar.exe"):
+-                cand.append(self.base_dir / sub)
++            roots = [self.base_dir]
++            if self.base_dir.parent != self.base_dir:
++                roots.append(self.base_dir.parent)          # tools\ рядом с папкой приложения
++            for root in roots:
++                for sub in ("tools/LesoLidar", "LesoLidar"):
++                    cand += self._exe_in(root / sub)
++                cand.append(root / "tools" / "LesoLidar.exe")
++                try:                                         # tools\LesoLidar_v2\…, tools\LesoLidar\dist\LesoLidar\…
++                    for d in sorted((root / "tools").glob("LesoLidar*")):
++                        if d.is_dir():
++                            cand += sorted(d.glob("*/LesoLidar.exe")) + sorted(d.glob("*/*/LesoLidar.exe"))
++                except OSError:
++                    pass
++        seen, found = set(), []
+         for c in cand:
+-            if c.is_file():
+-                self.exe = c.resolve()
+-                return
++            k = str(c).lower()
++            if k in seen:
++                continue
++            seen.add(k)
++            self.checked.append(str(c))
++            try:
++                if c.is_file():
++                    found.append(c)
++            except OSError:
++                pass
++        if found:                                            # лучше тот, рядом с которым есть _internal
++            best = next((c for c in found if (c.parent / "_internal").is_dir()), found[0])
++            self.exe = best.resolve()
++            for ev in env_values:                            # какое значение LESOLIDAR_EXE сработало
++                p = Path(ev)
++                if best in (self._exe_in(p) if (p.is_dir() or not p.suffix) else [p]):
++                    self.env_value = ev
++                    break
++            return
+         py = os.environ.get("LESOLIDAR_PYTHON")
+         if py:
+             self.python = py
+@@ -341,11 +408,41 @@
+             return self.pkg_path
+         return None
+ 
++    def redetect(self, min_interval: float = 3.0, force: bool = False) -> None:
++        """[v20.10] Повторный поиск без перезапуска — не чаще раза в min_interval с: пока обработчик
++        не найден, если файл пропал или изменилось значение LESOLIDAR_EXE (.env/окружение);
++        force — кнопка «Проверить снова» у администратора."""
++        if not force and time.time() - getattr(self, "_detect_at", 0) < min_interval:
++            return
++        if (force or not self.kind or (self.exe is not None and not self.exe.is_file())
++                or self._env_values() != getattr(self, "_env_seen", None)):
++            self.detect()
++        else:
++            self._detect_at = time.time()
++
++    def setup_hint(self) -> Dict[str, Any]:
++        """Куда положить программу — показывается только администратору."""
++        d = self.base_dir / "tools" / "LesoLidar"
++        return {"dir": str(d), "exe": str(d / "LesoLidar.exe"), "env_file": str(self.base_dir / ".env"),
++                "env_value": getattr(self, "env_value", "") or None, "checked": list(getattr(self, "checked", []))[:12]}
++
++    def public_problems(self) -> List[str]:
++        """[v20.10] Для не-администраторов — без путей сервера."""
++        if not self.kind:
++            return ["ЛесоЛидар на сервере ещё не настроен — обратитесь к администратору"]
++        return [p for p in self.problems() if "\\" not in p and "/" not in p]
++
+     def problems(self) -> List[str]:
+         out = []
+         if not self.kind:
+-            out.append("Не найден LesoLidar.exe: укажите LESOLIDAR_EXE в .env или положите папку LesoLidar "
+-                       "(LesoLidar.exe + _internal) в tools/LesoLidar/")
++            ev = getattr(self, "env_value", "")
++            if ev:
++                out.append(f"LESOLIDAR_EXE = «{ev}» — там нет LesoLidar.exe. Укажите полный путь к LesoLidar.exe "
++                           "или уберите строку из .env и положите папку программы в tools\\LesoLidar\\ рядом с app.py")
++            else:
++                out.append("Не найден LesoLidar.exe: скопируйте папку программы целиком (LesoLidar.exe + _internal) "
++                           "в tools\\LesoLidar\\ рядом с app.py или укажите LESOLIDAR_EXE в .env — "
++                           "см. README_DEPLOY_RU, раздел «ЛесоЛидар»")
+         elif self.exe and not (self.exe.parent / "_internal").is_dir():
+             out.append("Рядом с LesoLidar.exe нет папки _internal — скопируйте папку программы целиком")
+         if self.exe and not IS_WIN:
+@@ -915,11 +1012,14 @@
+         return out
+ 
+     @r.get("/caps")
+-    def caps(request: Request):
++    def caps(request: Request, recheck: int = 0):
+         adm = bool(is_admin(request))
++        # [v20.10] скопировали программу / поправили .env — подхватываем без перезапуска
++        engine.redetect(min_interval=1.0 if (recheck and adm) else 3.0, force=bool(recheck and adm))
+         return {
++            "setup": engine.setup_hint() if adm and not engine.kind else None,
+             "available": bool(engine.kind) and not (engine.exe and not IS_WIN),
+-            "engine": engine.kind, "problems": engine.problems(), "is_admin": adm,
++            "engine": engine.kind, "problems": engine.problems() if adm else engine.public_problems(), "is_admin": adm,
+             "engine_path": str(engine.exe or engine.python or "") if adm else None,
+             "models": engine.models(), "tables": engine.tables(),
+             "max_upload_bytes": max_upload, "chunk_bytes": CHUNK,
+--- v20.9/manuals_editor_api.py
++++ v20.10/manuals_editor_api.py
+@@ -0,0 +1,448 @@
++# -*- coding: utf-8 -*-
++"""
++manuals_editor_api.py — сервер веб-редакций методичек (v20.10).
++
++Редактор на странице /manuals (static/manuals-workspace.js) не трогает исходный Word/PDF:
++правки публикуются отдельными «веб-редакциями» 1, 2, 3 …, прежние остаются в истории,
++любую можно открыть и опубликовать заново. Без этого модуля страница показывала
++«Чтение доступно, но сервер редакций не подключён… Установите модуль manuals_editor_api».
++
++Маршруты (префикс /api/manuals-editions):
++  GET  /_status               — готовность сервера редакций (диагностика, без данных);
++  GET  /{fid}                 — последняя редакция файла {fid, revision, html, title, source_ver, saved_at};
++                                 revision = 0 и html = null, если редакций ещё нет. Читать могут все,
++                                 кто видит методички (как и сами файлы);
++  PUT  /{fid}                 — опубликовать новую редакцию: JSON {html, title, source_ver, base_revision}.
++                                 Только администратор (с доп. паролем) + CSRF-токен. Если base_revision
++                                 не совпадает с последней редакцией (правили в другом окне) — 409;
++  GET  /{fid}/history         — редакции файла, новые сверху {items:[{revision, saved_at, title, size}]} — админ;
++  GET  /{fid}/revisions/{n}   — текст редакции n — администратор.
++
++Хранение: instance/manuals_editions/<fid>/r000001.json …, index.json — список редакций.
++Запись атомарная (временный файл + os.replace), публикация под файловой блокировкой —
++безопасно при нескольких воркерах uvicorn. HTML очищается и на сервере (белый список тегов,
++атрибутов и стилей — тот же, что в редакторе): <script>, on*-обработчики, javascript:-ссылки,
++внешние картинки не сохраняются.
++
++Настройки (.env, необязательные):
++  MANUALS_EDITIONS_DIR    — папка редакций (по умолчанию instance/manuals_editions рядом с app.py);
++  MANUALS_EDITION_MAX_MB  — предельный размер одной редакции с картинками, МБ (40);
++  MANUALS_EDITIONS_KEEP   — сколько последних редакций одного файла хранить (100).
++
++Подключение (app.py, после manuals_api):
++  from manuals_editor_api import build_router as _build_manuals_editor_router
++  app.include_router(_build_manuals_editor_router(base_dir=BASE_DIR, require_admin=require_admin,
++                     verify_csrf=verify_csrf, logger=logger))
++"""
++from __future__ import annotations
++
++import html as _html
++import json
++import os
++import re
++import threading
++import time
++import uuid
++from datetime import datetime
++from html.parser import HTMLParser
++from pathlib import Path
++from typing import Any, Callable, Dict, List, Optional
++from urllib.parse import unquote
++
++from fastapi import APIRouter, HTTPException, Request
++from fastapi.responses import JSONResponse
++
++VERSION = "20.10"
++MB = 1024 * 1024
++FID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$")
++REV_FILE_RE = re.compile(r"^r(\d{6,9})\.json$")
++NO_STORE = {"Cache-Control": "no-store"}
++
++
++def _env_int(name: str, default: int) -> int:
++    try:
++        return int(float(os.environ.get(name, "") or default))
++    except (TypeError, ValueError):
++        return default
++
++
++def _now() -> str:
++    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
++
++
++def check_fid(fid: str) -> str:
++    fid = str(fid or "")
++    if not FID_RE.match(fid) or ".." in fid:
++        raise HTTPException(400, "Некорректный идентификатор файла методички")
++    return fid
++
++
++# ───────────────────────────── очистка HTML (как clean() в manuals-workspace.js) ─────────────────────────────
++ALLOWED_TAGS = frozenset(
++    "p div span br h1 h2 h3 h4 h5 h6 strong b em i u s strike sub sup ul ol li blockquote pre code hr "
++    "table thead tbody tfoot tr td th caption colgroup col img a figure figcaption".split())
++# удаляются вместе с содержимым
++DROP_TAGS = frozenset(
++    "script style iframe object embed svg math template noscript form button input textarea select "
++    "meta link base head title frameset frame applet audio video canvas".split())
++VOID_TAGS = frozenset("br hr img col wbr area input meta link base source track param embed frame".split())
++STYLE_PROPS = (
++    "text-align font-weight font-style text-decoration color background-color font-size font-family width "
++    "height max-width border border-collapse vertical-align padding margin margin-left").split()
++STYLE_BAD = re.compile(r"url|expression|import|behavior|binding|javascript|[<>\\{}@]|/\*", re.I)
++NUM_ATTR = re.compile(r"^\d{1,4}%?$")
++DATA_IMG = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$", re.I)
++CTRL = re.compile(r"[\x00-\x20\x7f\\]")
++
++
++def url_safe(value: str, image: bool) -> bool:
++    v = (value or "").strip()
++    if CTRL.search(v):
++        return False
++    try:
++        d = unquote(v, errors="strict")
++    except Exception:
++        return False
++    if image and DATA_IMG.match(v):
++        return True
++    if d.startswith("//") or "\\" in d or CTRL.search(d):
++        return False
++    if image:
++        return bool(re.match(r"^/(api/manuals/|uploads/|static/)", d))
++    return bool(re.match(r"^(https?:|mailto:|/(?!/)|#)", d, re.I))
++
++
++def clean_style(value: str) -> str:
++    out = []
++    for part in (value or "").split(";"):
++        if ":" not in part:
++            continue
++        k, v = part.split(":", 1)
++        k, v = k.strip().lower(), v.strip()
++        if k in STYLE_PROPS and v and len(v) <= 200 and not STYLE_BAD.search(v):
++            out.append(f"{k}: {v}")
++    return "; ".join(out)
++
++
++class _Cleaner(HTMLParser):
++    def __init__(self) -> None:
++        super().__init__(convert_charrefs=True)
++        self.out: List[str] = []
++        self.stack: List[str] = []          # открытые разрешённые теги
++        self.skip: Optional[str] = None     # удаляемый тег (вместе с содержимым)
++        self.skip_depth = 0
++
++    def _attrs(self, tag: str, attrs) -> str:
++        res = []
++        for k, v in attrs:
++            k = (k or "").lower()
++            v = "" if v is None else str(v)
++            if k == "style":
++                css = clean_style(v)
++                if css:
++                    res.append(("style", css))
++            elif k == "src" and tag == "img":
++                if url_safe(v, True):
++                    res.append(("src", v.strip()))
++            elif k == "href" and tag == "a":
++                if url_safe(v, False):
++                    res.append(("href", v.strip()))
++            elif k in ("alt", "title"):
++                res.append((k, v[:500]))
++            elif k in ("width", "height", "colspan", "rowspan", "start") and NUM_ATTR.match(v):
++                res.append((k, v))
++        if tag == "a":
++            res += [("rel", "noopener noreferrer"), ("target", "_blank")]
++        return "".join(f' {k}="{_html.escape(v, quote=True)}"' for k, v in res)
++
++    def handle_starttag(self, tag, attrs):
++        tag = tag.lower()
++        if self.skip:
++            if tag == self.skip and tag not in VOID_TAGS:
++                self.skip_depth += 1
++            return
++        if tag in DROP_TAGS:
++            if tag not in VOID_TAGS:
++                self.skip, self.skip_depth = tag, 1
++            return
++        if tag not in ALLOWED_TAGS:
++            return                                   # тег снимается, содержимое остаётся
++        self.out.append(f"<{tag}{self._attrs(tag, attrs)}>")
++        if tag not in VOID_TAGS:
++            self.stack.append(tag)
++
++    def handle_startendtag(self, tag, attrs):
++        tag = tag.lower()
++        if tag in VOID_TAGS or self.skip or tag in DROP_TAGS or tag not in ALLOWED_TAGS:
++            self.handle_starttag(tag, attrs)
++            return
++        self.handle_starttag(tag, attrs)             # <p/> → <p></p>
++        self.handle_endtag(tag)
++
++    def handle_endtag(self, tag):
++        tag = tag.lower()
++        if self.skip:
++            if tag == self.skip:
++                self.skip_depth -= 1
++                if self.skip_depth <= 0:
++                    self.skip, self.skip_depth = None, 0
++            return
++        if tag in VOID_TAGS or tag not in self.stack:
++            return                                   # лишний закрывающий тег — пропускаем
++        while self.stack:
++            t = self.stack.pop()
++            self.out.append(f"</{t}>")
++            if t == tag:
++                break
++
++    def handle_data(self, data):
++        if not self.skip and data:
++            self.out.append(_html.escape(data, quote=False))
++
++    def close_all(self) -> str:
++        self.close()
++        while self.stack:
++            self.out.append(f"</{self.stack.pop()}>")
++        return "".join(self.out)
++
++
++def clean_html(value: str) -> str:
++    """Белый список тегов / атрибутов / стилей. Комментарии, doctype, обработчики событий удаляются."""
++    p = _Cleaner()
++    p.feed(value or "")
++    return p.close_all()
++
++
++# ───────────────────────────── хранилище ─────────────────────────────
++class Conflict(Exception):
++    def __init__(self, current: int):
++        super().__init__(current)
++        self.current = current
++
++
++class Store:
++    def __init__(self, root: Path, keep: int = 100, log=None):
++        self.root = Path(root)
++        self.root.mkdir(parents=True, exist_ok=True)
++        self.keep = max(1, keep)
++        self.log = log
++        self._lock = threading.Lock()
++
++    def fdir(self, fid: str) -> Path:
++        return self.root / check_fid(fid)
++
++    @staticmethod
++    def _write_json(path: Path, data: Any) -> None:
++        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
++        with open(tmp, "w", encoding="utf-8") as f:
++            json.dump(data, f, ensure_ascii=False)
++            f.flush()
++            try:
++                os.fsync(f.fileno())
++            except OSError:
++                pass
++        for i in range(20):                          # Windows: файл может быть открыт читателем
++            try:
++                os.replace(tmp, path)
++                return
++            except PermissionError:
++                time.sleep(0.05 * (i + 1))
++        os.replace(tmp, path)
++
++    @staticmethod
++    def _read_json(path: Path) -> Optional[Dict[str, Any]]:
++        try:
++            with open(path, encoding="utf-8") as f:
++                d = json.load(f)
++            return d if isinstance(d, dict) else None
++        except (OSError, ValueError):
++            return None
++
++    def revisions(self, fid: str) -> List[int]:
++        d = self.fdir(fid)
++        if not d.is_dir():
++            return []
++        out = []
++        for p in d.iterdir():
++            m = REV_FILE_RE.match(p.name)
++            if m:
++                out.append(int(m.group(1)))
++        return sorted(out)
++
++    def read(self, fid: str, n: int) -> Optional[Dict[str, Any]]:
++        if n < 1:
++            return None
++        return self._read_json(self.fdir(fid) / f"r{n:06d}.json")
++
++    def latest(self, fid: str) -> Optional[Dict[str, Any]]:
++        for n in reversed(self.revisions(fid)):
++            rec = self.read(fid, n)
++            if rec:
++                return rec
++        return None
++
++    def history(self, fid: str) -> List[Dict[str, Any]]:
++        d = self.fdir(fid)
++        revs = self.revisions(fid)
++        idx = self._read_json(d / "index.json") or {}
++        items = {int(x.get("revision", 0)): x for x in idx.get("items", []) if isinstance(x, dict)}
++        out = []
++        for n in reversed(revs):
++            it = items.get(n)
++            if not it:                                # индекса нет / устарел — читаем файл редакции
++                rec = self.read(fid, n) or {}
++                it = {"revision": n, "saved_at": rec.get("saved_at"), "title": rec.get("title", ""),
++                      "size": len(rec.get("html") or ""), "source_ver": rec.get("source_ver")}
++            out.append({k: it.get(k) for k in ("revision", "saved_at", "title", "size", "source_ver")})
++        return out
++
++    # межпроцессная блокировка: lock-файл с O_EXCL (+ снятие «зависшей» старше 60 с)
++    def _acquire(self, d: Path, timeout: float = 15.0) -> Path:
++        lock = d / ".lock"
++        t0 = time.time()
++        while True:
++            try:
++                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
++                os.write(fd, f"{os.getpid()} {time.time():.0f}".encode())
++                os.close(fd)
++                return lock
++            except FileExistsError:
++                try:
++                    if time.time() - lock.stat().st_mtime > 60:
++                        lock.unlink()
++                        continue
++                except OSError:
++                    pass
++                if time.time() - t0 > timeout:
++                    raise HTTPException(503, "Сервер редакций занят — повторите сохранение через несколько секунд")
++                time.sleep(0.05)
++
++    def save(self, fid: str, rec: Dict[str, Any], base_revision: Optional[int]) -> Dict[str, Any]:
++        d = self.fdir(fid)
++        d.mkdir(parents=True, exist_ok=True)
++        with self._lock:
++            lock = self._acquire(d)
++            try:
++                revs = self.revisions(fid)
++                cur = revs[-1] if revs else 0
++                if base_revision is not None and int(base_revision) != cur:
++                    raise Conflict(cur)
++                n = cur + 1
++                rec = dict(rec, fid=fid, revision=n, saved_at=_now())
++                self._write_json(d / f"r{n:06d}.json", rec)
++                idx = self._read_json(d / "index.json") or {}
++                items = [x for x in idx.get("items", []) if isinstance(x, dict) and int(x.get("revision", 0)) in set(revs)]
++                items.append({"revision": n, "saved_at": rec["saved_at"], "title": rec.get("title", ""),
++                              "size": len(rec.get("html") or ""), "source_ver": rec.get("source_ver"),
++                              "by": rec.get("by")})
++                for old in (revs + [n])[:-self.keep]:  # храним последние keep редакций
++                    try:
++                        (d / f"r{old:06d}.json").unlink()
++                    except OSError:
++                        pass
++                keep_set = set((revs + [n])[-self.keep:])
++                items = [x for x in items if int(x.get("revision", 0)) in keep_set]
++                self._write_json(d / "index.json", {"fid": fid, "items": items})
++                return rec
++            finally:
++                try:
++                    lock.unlink()
++                except OSError:
++                    pass
++
++
++def public(rec: Optional[Dict[str, Any]], fid: str) -> Dict[str, Any]:
++    if not rec:
++        return {"fid": fid, "revision": 0, "html": None, "title": None, "source_ver": None, "saved_at": None}
++    return {k: rec.get(k) for k in ("fid", "revision", "html", "title", "source_ver", "saved_at")}
++
++
++# ───────────────────────────── маршруты ─────────────────────────────
++def build_router(*, base_dir: str, require_admin: Optional[Callable[[Request], Any]] = None,
++                 is_admin: Optional[Callable[[Request], bool]] = None,
++                 verify_csrf: Optional[Callable[[Request], None]] = None,
++                 logger=None, workdir: Optional[str] = None, **_unused) -> APIRouter:
++    root = Path(workdir or os.environ.get("MANUALS_EDITIONS_DIR") or os.path.join(base_dir, "instance", "manuals_editions"))
++    store = Store(root, keep=_env_int("MANUALS_EDITIONS_KEEP", 100), log=logger)
++    max_bytes = _env_int("MANUALS_EDITION_MAX_MB", 40) * MB
++    r = APIRouter(prefix="/api/manuals-editions", tags=["manuals-editions"])
++    r.store = store  # для тестов
++
++    def admin(request: Request) -> str:
++        if require_admin is not None:
++            return str(require_admin(request) or "admin")   # 401 (+ X-Admin-Stepup) без входа / доп. пароля
++        if is_admin is not None and is_admin(request):
++            return "admin"
++        raise HTTPException(401, "Требуется авторизация администратора")
++
++    def log(msg: str) -> None:
++        if logger:
++            try:
++                logger.info(msg)
++            except Exception:
++                pass
++
++    @r.get("/_status")
++    def status():
++        return JSONResponse({"ready": True, "version": VERSION, "max_mb": max_bytes // MB}, headers=NO_STORE)
++
++    @r.get("/{fid}")
++    def get_edition(fid: str):
++        fid = check_fid(fid)
++        return JSONResponse(public(store.latest(fid), fid), headers=NO_STORE)
++
++    @r.put("/{fid}")
++    async def put_edition(fid: str, request: Request):
++        fid = check_fid(fid)
++        who = admin(request)
++        if verify_csrf is not None:
++            verify_csrf(request)
++        cl = request.headers.get("content-length")
++        if cl and cl.isdigit() and int(cl) > max_bytes + MB:
++            raise HTTPException(413, f"Редакция больше {max_bytes // MB} МБ — уменьшите или удалите крупные иллюстрации")
++        raw = await request.body()
++        if len(raw) > max_bytes + MB:
++            raise HTTPException(413, f"Редакция больше {max_bytes // MB} МБ — уменьшите или удалите крупные иллюстрации")
++        try:
++            data = json.loads(raw.decode("utf-8") or "{}")
++        except (UnicodeDecodeError, ValueError):
++            raise HTTPException(400, "Ожидается JSON {html, title, source_ver, base_revision}")
++        if not isinstance(data, dict) or not isinstance(data.get("html"), str):
++            raise HTTPException(400, "Нет текста редакции (поле html)")
++        html = clean_html(data["html"])
++        if not re.sub(r"<[^>]+>|&nbsp;|\s", "", html) and "<img" not in html:
++            raise HTTPException(400, "Пустая редакция не сохраняется")
++        if len(html.encode("utf-8")) > max_bytes:
++            raise HTTPException(413, f"Редакция больше {max_bytes // MB} МБ — уменьшите или удалите крупные иллюстрации")
++        base = data.get("base_revision")
++        if base is not None:
++            try:
++                base = int(base)
++            except (TypeError, ValueError):
++                raise HTTPException(400, "base_revision должен быть числом")
++        rec = {"html": html, "title": str(data.get("title") or "")[:300],
++               "source_ver": str(data.get("source_ver") or "1")[:40], "by": str(who)[:80]}
++        try:
++            saved = store.save(fid, rec, base)
++        except Conflict as c:
++            raise HTTPException(409, f"Редакцию уже обновили в другом окне (сейчас редакция {c.current}). "
++                                     "Откройте актуальную и перенесите правки.")
++        log(f"[manuals-editions] {fid}: сохранена редакция {saved['revision']} ({len(html)} символов)")
++        return JSONResponse(public(saved, fid), headers=NO_STORE)
++
++    @r.get("/{fid}/history")
++    def history(fid: str, request: Request):
++        fid = check_fid(fid)
++        admin(request)
++        return JSONResponse({"fid": fid, "items": store.history(fid)}, headers=NO_STORE)
++
++    @r.get("/{fid}/revisions/{n}")
++    def revision(fid: str, n: int, request: Request):
++        fid = check_fid(fid)
++        admin(request)
++        rec = store.read(fid, n)
++        if not rec:
++            raise HTTPException(404, f"Редакция {n} не найдена (возможно, удалена как старая)")
++        return JSONResponse(public(rec, fid), headers=NO_STORE)
++
++    return r
+--- v20.9/security_hardening.py
++++ v20.10/security_hardening.py
+@@ -475,6 +475,7 @@
+         ("/api/vector-layers", 512 * MB),
+         ("/api/upload_shp", 512 * MB),
+         ("/api/admin/manuals/", big),           # PDF/Word руководств (manuals_api)
++        ("/api/manuals-editions/", (_env_int("MANUALS_EDITION_MAX_MB", 40) + 1) * MB),  # [v20.10] веб-редакции с картинками
+         ("/api/crs-shift/", big),               # ZIP + GeoJSON (crs_shift)
+         ("/upload_shp", 512 * MB),
+         ("/upload", big),
+--- v20.9/static/map-core.js
++++ v20.10/static/map-core.js
+@@ -2285,6 +2285,9 @@
+ 
+     // Строит объект слоя OpenLayers для заданного ключа (без добавления на карту)
+     function _buildExternalLayer(key, layerName, def) {
++        // [v20.10] имя слоя GeoServer не передали (null) — берём из определения слоя.
++        // Иначе LAYERS не попадал в запрос, а _target уходил в GEOSERVER → снимок не грузился.
++        if (!layerName && def && def.sublabel) layerName = def.sublabel;
+         const wmsBase  = def ? getWmsBaseUrl(def.wmsUrl) : CONFIG.GEOSERVER_WMS;
+         const isRaster = def ? def.isRaster : false;
+         const layerSrs = (def && def.srs) ? def.srs : null;
+@@ -2551,6 +2554,14 @@
+ 
+     window.toggleExternalLayer = function(key, layerName, isOn) {
+         const def     = _getExtDef(key);
++        // [v20.10] «Съёмка по годам» и поиск ДЗЗ передавали layerName = null → тайлы запрашивались
++        // без LAYERS и с _target=GEOSERVER (снимок не отображался ни сразу, ни при приближении).
++        if (!layerName && def && def.sublabel) layerName = def.sublabel;
++        if (isOn && !layerName) {
++            console.warn('[layers] не найдено имя слоя GeoServer для', key);
++            AppState.externalLayerState[key] = false;
++            return;
++        }
+         const layerId = `ext-layer-${key}`;
+ 
+         if (!isOn) {
+--- v20.9/static/panel-timeline.js
++++ v20.10/static/panel-timeline.js
+@@ -1,4 +1,12 @@
+-/* panel-timeline.js — v20.8. «Съёмка по годам»: нижняя шкала снимков ДЗЗ по типу съёмки и дате.
++/* panel-timeline.js — v20.10. «Съёмка по годам»: нижняя шкала снимков ДЗЗ по типу съёмки и дате.
++ *
++ * v20.10:
++ *   • снимок не отображался (ни сразу, ни при приближении): слои включались с именем null → тайлы шли без LAYERS
++ *     и в GEOSERVER вместо GEOSERVER_EXT. Теперь передаётся настоящее имя слоя (sublabel), а map-core.js
++ *     подставляет его сам, если вызвавший код имя не передал;
++ *   • шкала крупнее: все размеры масштабируются переменной --ys, по умолчанию 130 %; в шапке «A− 130 % A+»
++ *     (100…175 %, щелчок по проценту — вернуть 130 %), размер запоминается. В невысоком или узком окне
++ *     (телефон) масштаб сам уменьшается: шкала не больше ~45 % высоты карты, на телефоне — прежний размер.
+  *
+  * Логика прежняя: тип съёмки → год → месяц → день → снимок, выбранный снимок показывается на карте.
+  * Что изменилось в v20.8:
+@@ -16,7 +24,7 @@
+  */
+ (function () {
+     'use strict';
+-    var VER = '20.8';
++    var VER = '20.10';
+     var LS_KEY = 'ytl208_state';
+     var TYPES = {
+         space:  { label: 'Спутник',        short: 'Спутник',  color: '#9c7ee8', icon: 'fa-satellite' },
+@@ -30,6 +38,7 @@
+     var MON_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+     var MON_FULL = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+     var ALL_YEAR = -1, UNDATED = 0;
++    var SIZES = [1, 1.15, 1.3, 1.5, 1.75], SIZE_DEF = 1.3;   // [v20.10] масштаб шкалы (--ys)
+ 
+     var S = null;           // текущий экземпляр шкалы
+ 
+@@ -168,7 +177,7 @@
+     var CSS = [
+         '#year-timeline-bar.ytl{position:absolute;left:10px;right:74px;bottom:8px;z-index:940;display:flex;flex-direction:column;gap:6px;padding:7px 9px 8px;',
+         'background:rgba(8,16,9,.94);border:1px solid rgba(130,233,56,.24);border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.45);color:#e3f2e3;',
+-        'font:12px/1.3 var(--gs-font,Inter,Lato,system-ui,sans-serif);-webkit-user-select:none;user-select:none;box-sizing:border-box;backdrop-filter:blur(6px);}',
++        'font-size:12px;line-height:1.3;font-family:var(--gs-font,Inter,Lato,system-ui,sans-serif);-webkit-user-select:none;user-select:none;box-sizing:border-box;backdrop-filter:blur(6px);}',
+         '.ytl *{box-sizing:border-box;}',
+         '.ytl button{font-family:inherit;}',
+         '.ytl-head{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap;min-height:28px;}',
+@@ -240,7 +249,7 @@
+         '.ytl-day b{font-size:16px;line-height:1.05;}',
+         '.ytl-day small{font-size:10px;color:#8fa58f;font-weight:700;white-space:nowrap;}',
+         '.ytl-day.wide b{font-size:12px;}',
+-        '.ytl-card{--c:#9c7ee8;flex:none;width:224px;height:54px;display:flex;align-items:center;gap:8px;padding:0 5px 0 9px;border-radius:10px;',
++        '.ytl-card{--c:#9c7ee8;flex:none;width:248px;height:54px;display:flex;align-items:center;gap:8px;padding:0 5px 0 9px;border-radius:10px;',
+         'border:1px solid rgba(255,255,255,.1);border-left:4px solid var(--c);background:rgba(255,255,255,.04);cursor:pointer;position:relative;text-align:left;color:inherit;}',
+         '.ytl-card:hover{background:rgba(255,255,255,.08);}',
+         '.ytl-card.sel{border-color:#82e938;border-left-color:var(--c);box-shadow:inset 0 0 0 1px #82e938;background:rgba(130,233,56,.11);}',
+@@ -256,6 +265,18 @@
+         '.ytl-ca button i,.ytl-ca button svg{width:13px;height:13px;}',
+         '.ytl-card.shown .ytl-eye{color:#1b2a10;background:#ffd54a;border-color:#ffd54a;}',
+         '.ytl-card.shown .ytl-ct small:before{content:"● ";color:#ffd54a;}',
++        '.ytl-size{display:inline-flex;align-items:center;gap:2px;flex:none;}',
++        '.ytl-sz{font-weight:800;font-size:12px;letter-spacing:-.5px;}',
++        '.ytl-szv{min-width:44px;height:28px;padding:0 4px;border:0;border-radius:6px;background:none;color:#9fb59f;font-weight:800;font-size:11px;cursor:pointer;}',
++        '.ytl-szv:hover{color:#fff;background:rgba(130,233,56,.1);}',
++        '.ytl-szv.capped{color:#ffd54a;}',
++        '.ytl.compact .ytl-szv,.ytl.mid .ytl-szv{display:none;}',
++        '.ytl-tshort{display:none;}',
++        '.ytl.mid .ytl-tfull{display:none;}',
++        '.ytl.mid .ytl-tshort{display:inline;}',
++        '.ytl.tight .ytl-title span{display:none;}',
++        '.ytl.tight .ytl-nav{flex-basis:150px;}',
++        '.ytl-m.shown:after{top:auto;bottom:3px;right:3px;}',
+         '.ytl-empty{color:#8fa58f;padding:0 12px;font-style:italic;display:flex;align-items:center;white-space:nowrap;}',
+         '.ytl.collapsed .ytl-scale,.ytl.collapsed .ytl-rib{display:none;}',
+         '.ytl.compact .ytl-scale{flex-direction:column;}',
+@@ -280,6 +301,11 @@
+         'body.timeline-active #_global_toast:not(#ytl-x),body.timeline-active #toast-container:not(#ytl-x){bottom:calc(var(--ytl-vh,160px) + 14px)!important;}',
+         'body.timeline-active .ytl-lifted:not(#ytl-x){translate:0 calc(-1 * var(--ytl-lift,0px))!important;}'
+     ].join('\n');
++    // [v20.10] масштаб: каждое «Npx» (кроме 1px-границ и правил для body) → calc(var(--ys,1)*Npx)
++    CSS = CSS.split('\n').map(function (l) {
++        if (/^body\.timeline-active/.test(l)) return l;
++        return l.replace(/(^|[^\w.-])(\d*\.?\d+)px\b/g, function (m, pre, n) { return +n <= 1 ? m : pre + 'calc(var(--ys,1)*' + n + 'px)'; });
++    }).join('\n');
+     function ensureCss() {
+         var st = document.getElementById('ytl208-css');
+         if (!st) { st = document.createElement('style'); st.id = 'ytl208-css'; document.head.appendChild(st); }
+@@ -307,9 +333,11 @@
+             type: (saved.type === 'all' || TYPES[saved.type]) ? saved.type : 'all',
+             year: saved.year || 0, month: (saved.month == null ? null : saved.month), sel: saved.sel || null,
+             exclusive: saved.exclusive !== false, collapsed: !!saved.collapsed,
++            size: SIZES.indexOf(+saved.size) >= 0 ? +saved.size : SIZE_DEF, eff: 0,
+             timers: [], offs: [], shownSig: '', lifted: [], ro: null
+         };
+         if (S.collapsed) bar.classList.add('collapsed');
++        S.eff = S.size; bar.style.setProperty('--ys', String(S.size));
+         // если на карте уже показан снимок — начинаем с него
+         var on = S.data.items.filter(isOn);
+         if (on.length) {
+@@ -378,7 +406,7 @@
+     }
+     function save() {
+         if (!S) return;
+-        lsSet({ type: S.type, year: S.year, month: S.month, sel: S.sel, exclusive: S.exclusive, collapsed: S.collapsed });
++        lsSet({ type: S.type, year: S.year, month: S.month, sel: S.sel, exclusive: S.exclusive, collapsed: S.collapsed, size: S.size });
+     }
+ 
+     // ── выборка ─────────────────────────────────────────────────────────────────
+@@ -416,6 +444,11 @@
+                 '<label class="ytl-switch" title="При выборе снимка остальные снимки этого типа скрываются с карты">' +
+                     '<input type="checkbox" data-act="excl"' + (S.exclusive ? ' checked' : '') + '><span class="ytl-sw"></span><span class="ytl-tl">Только выбранный</span></label>' +
+                 '<button type="button" class="ytl-btn" data-act="hideall" title="Скрыть с карты снимки, показанные сейчас (с учётом фильтра типа)"><i class="fa-solid fa-eye-slash"></i><span class="ytl-tl">Скрыть показанные</span> <span class="ytl-cnt" data-role="shown">0</span></button>' +
++                '<div class="ytl-size" role="group" aria-label="Размер шкалы">' +
++                    '<button type="button" class="ytl-ibtn ytl-sz" data-act="szdn" title="Мельче">A−</button>' +
++                    '<button type="button" class="ytl-szv" data-act="szdef" data-role="size"></button>' +
++                    '<button type="button" class="ytl-ibtn ytl-sz" data-act="szup" title="Крупнее">A+</button>' +
++                '</div>' +
+                 '<button type="button" class="ytl-ibtn" data-act="collapse" title="' + (S.collapsed ? 'Развернуть шкалу' : 'Свернуть шкалу') + '"><i class="fa-solid ' + (S.collapsed ? 'fa-chevron-up' : 'fa-chevron-down') + '"></i></button>' +
+                 '<button type="button" class="ytl-ibtn" data-act="close" title="Закрыть «Съёмку по годам»"><i class="fa-solid fa-xmark"></i></button>' +
+             '</div>' +
+@@ -433,6 +466,30 @@
+         renderScale();
+         renderRibbon();
+         syncShown(true);
++        sizeUi();
++    }
++    function sizeUi() {
++        if (!S) return;
++        var v = S.bar.querySelector('[data-role="size"]'), i = SIZES.indexOf(S.size);
++        if (v) {
++            var capped = S.eff && S.eff < S.size;
++            v.textContent = Math.round((capped ? S.eff : S.size) * 100) + '%';
++            v.classList.toggle('capped', !!capped);
++            v.title = 'Размер шкалы: ' + Math.round(S.size * 100) + '%' +
++                (capped ? ' (окно невысокое — показано ' + Math.round(S.eff * 100) + '%)' : '') +
++                (S.size !== SIZE_DEF ? '. Щелчок — вернуть ' + Math.round(SIZE_DEF * 100) + '%' : '');
++        }
++        var dn = S.bar.querySelector('[data-act="szdn"]'), up = S.bar.querySelector('[data-act="szup"]');
++        if (dn) dn.disabled = i <= 0;
++        if (up) up.disabled = i >= SIZES.length - 1;
++    }
++    function setSize(v) {
++        if (!S) return;
++        v = +v;
++        if (SIZES.indexOf(v) < 0) v = SIZE_DEF;
++        S.size = v; save();
++        layout(); sizeUi(); scrollToSel(false);
++        S.timers.push(setTimeout(function () { layout(); sizeUi(); }, 160));
+     }
+     function typesHtml() {
+         var cnt = { all: S.data.items.length };
+@@ -444,7 +501,7 @@
+             var T = TYPES[t], n = cnt[t] || 0;
+             h += '<button type="button" class="ytl-chip' + (S.type === t ? ' on' : '') + '" data-type="' + t + '" role="radio" aria-checked="' + (S.type === t) + '"' +
+                  (n ? '' : ' disabled') + ' title="' + esc(T.label + (n ? ': ' + n + ' сн.' : ': снимков нет')) + '">' +
+-                 '<span class="ytl-dot" style="background:' + T.color + '"></span><span class="ytl-tl">' + esc(T.short === 'ЛУ' ? 'Лесоустройство' : T.label) + '</span><span class="ytl-cnt">' + n + '</span></button>';
++                 '<span class="ytl-dot" style="background:' + T.color + '"></span><span class="ytl-tl">' + (T.short === 'ЛУ' ? '<span class="ytl-tfull">Лесоустройство</span><span class="ytl-tshort">ЛУ</span>' : esc(T.label)) + '</span><span class="ytl-cnt">' + n + '</span></button>';
+         });
+         return h;
+     }
+@@ -478,7 +535,7 @@
+         }
+         for (m = 1; m <= 12; m++) mh += monthCell(m, MON[m - 1], per[m], max, MON_FULL[m - 1] + ' ' + S.year + ': ' + per[m].length + ' сн.');
+         var mo = S.bar.querySelector('[data-role="months"]');
+-        mo.style.gridTemplateColumns = 'minmax(60px,1.1fr) repeat(' + (cols - 1) + ', minmax(0,1fr))';
++        mo.style.gridTemplateColumns = 'minmax(calc(var(--ys,1)*60px),1.1fr) repeat(' + (cols - 1) + ', minmax(0,1fr))';
+         mo.innerHTML = mh;
+     }
+     function monthCell(m, lab, list, max, tip) {
+@@ -614,7 +671,8 @@
+                 left = Math.max(left, r.right - M.left + 8);
+             });
+         });
+-        var full = (right + left) > M.width * 0.42 || (M.width - right - left) < 560;
++        var k = S.size || 1;
++        var full = (right + left) > M.width * 0.42 || (M.width - right - left) < 560 * Math.min(k, 1.3);
+         if (full) {
+             right = 6; left = 6;
+             cands.forEach(function (n) { n.classList.add('ytl-lifted'); S.lifted.push(n); });
+@@ -622,9 +680,22 @@
+         bar.style.left = Math.round(left) + 'px';
+         bar.style.right = Math.round(right) + 'px';
+         var bw = M.width - right - left;
+-        bar.classList.toggle('compact', bw < 900);
+-        bar.classList.toggle('mid', bw >= 900 && bw < 1420);
+         bar.classList.toggle('full', full);
++        // [v20.10] масштаб: пороги «компактно/средне» растут вместе с размером; в невысоком или узком окне
++        // (телефон) масштаб уменьшается ступенями, пока шкала не займёт ≤ 45 % высоты карты и ширина окна
++        // не станет ≥ 700px × масштаб (выбор пользователя при этом не меняется)
++        var eff = S.size || 1, guard = 0;
++        for (;;) {
++            bar.style.setProperty('--ys', String(eff));
++            bar.classList.toggle('compact', bw < 900 * eff);
++            bar.classList.toggle('mid', bw >= 900 * eff && bw < 1420 * eff);
++            bar.classList.toggle('tight', bw >= 900 * eff && bw < 1160 * eff);
++            var j = SIZES.indexOf(eff);
++            if (j <= 0 || ++guard > SIZES.length) break;
++            if (M.width >= 700 * eff && (S.collapsed || bar.offsetHeight <= M.height * 0.45)) break;   // телефон / узкое окно — мельче
++            eff = SIZES[j - 1];
++        }
++        if (eff !== S.eff) { S.eff = eff; sizeUi(); }
+         updateVars();
+     }
+     function updateVars() {
+@@ -644,7 +715,13 @@
+         if (it.mb) { if (isOn(it) !== on && window.toggleMbtilesLayer) try { window.toggleMbtilesLayer(it.mb, on); } catch (e) { console.warn('[ytl] mbtiles', it.mb, e); } return; }
+         if (typeof window.toggleExternalLayer !== 'function') return;
+         var st = layerState();
+-        it.keys.forEach(function (k) { if (!!st[k] !== on) { try { window.toggleExternalLayer(k, null, on); } catch (e) { console.warn('[ytl] слой', k, e); } } });
++        it.keys.forEach(function (k) {
++            if (!!st[k] === on) return;
++            // [v20.10] передаём настоящее имя слоя GeoServer (раньше null → тайлы без LAYERS, снимок не грузился)
++            var df = defOf(k) || (typeof window._getExtDef === 'function' ? window._getExtDef(k) : null);
++            var ln = (df && df.sublabel) || (it.keys.length === 1 && (it.ld.sublabel || it.ld.layerName || it.ld.layer)) || null;
++            try { window.toggleExternalLayer(k, ln, on); } catch (e) { console.warn('[ytl] слой', k, e); }
++        });
+     }
+     function hideOthers(keep) {
+         var ids = {}, st = layerState();
+@@ -742,6 +819,11 @@
+                 if (typeof S.onClose === 'function') { var f = S.onClose; try { f(); } catch (_) {} if (S) destroy(false); }
+                 else destroy(false);
+                 return;
++            case 'szdn': case 'szup': case 'szdef': {
++                var si = SIZES.indexOf(S.size); if (si < 0) si = SIZES.indexOf(SIZE_DEF);
++                setSize(act === 'szdef' ? SIZE_DEF : SIZES[Math.max(0, Math.min(SIZES.length - 1, si + (act === 'szup' ? 1 : -1)))]);
++                return;
++            }
+             case 'collapse':
+                 S.collapsed = !S.collapsed; S.bar.classList.toggle('collapsed', S.collapsed); save();
+                 a.innerHTML = '<i class="fa-solid ' + (S.collapsed ? 'fa-chevron-up' : 'fa-chevron-down') + '"></i>';
+@@ -845,7 +927,8 @@
+         version: VER,
+         isOpen: function () { return !!S; },
+         items: function () { return S ? S.data.items.slice() : collect().items; },
+-        state: function () { return S ? { type: S.type, year: S.year, month: S.month, sel: S.sel, exclusive: S.exclusive, collapsed: S.collapsed } : null; },
++        state: function () { return S ? { type: S.type, year: S.year, month: S.month, sel: S.sel, exclusive: S.exclusive, collapsed: S.collapsed, size: S.size, eff: S.eff } : null; },
++        size: function (v) { if (!S) return null; if (v != null) setSize(v); return S.size; },
+         select: function (id, opt) { if (S) select(byId(id), opt); },
+         step: function (d) { if (S) step(d || 1); },
+         refresh: function () { if (S) { S.data = collect(); normalize(); render(); layout(); } },
+--- v20.9/static/lesolidar-web.js
++++ v20.10/static/lesolidar-web.js
+@@ -69,7 +69,7 @@
+ function caps(force) {
+   if (S.caps && !force) return Promise.resolve(S.caps);
+   if (S.capsP && !force) return S.capsP;
+-  S.capsP = call('GET', '/caps').then(function (c) { S.caps = c; S.capsP = null; return c; }, function (e) { S.capsP = null; throw e; });
++  S.capsP = call('GET', force === 'recheck' ? '/caps?recheck=1' : '/caps').then(function (c) { S.caps = c; S.capsP = null; return c; }, function (e) { S.capsP = null; throw e; });
+   return S.capsP;
+ }
+ function jobs(force) {
+@@ -503,10 +503,21 @@
+ 
+ /* ───────────── шаг 1: входные данные ───────────── */
+ function isAdmin() { return !!(S.caps && S.caps.is_admin); }
++/* [v20.10] подсказка администратору: куда положить программу (точный путь на сервере) */
++function setupHtml(c) {
++  var s = c && c.setup; if (!s) return '';
++  var C = function (t) { return '<code style="word-break:break-all;color:#e8f5e8">' + esc(t) + '</code>'; };
++  return '<div class="llw-sub" style="margin-top:6px;line-height:1.5">Скопируйте папку программы <b>целиком</b> (LesoLidar.exe + _internal, models, tables) так, чтобы был файл ' + C(s.exe) +
++    '<br>или впишите в ' + C(s.env_file) + ' строку ' + C('LESOLIDAR_EXE=полный\\путь\\LesoLidar.exe') + '.<br>Перезапуск не нужен — нажмите «Проверить снова».</div>';
++}
++function problemHead(c, adm) {
++  var p = (c.problems || [])[0] || 'Обработчик LesoLidar не найден';
++  return (adm && c.setup && /^Не найден LesoLidar\.exe/.test(p)) ? 'LesoLidar.exe не найден' : p;
++}
+ function step1(W, main) {
+   var M = S.modal, c = S.caps || {}, f = W.file;
+   var engineWarn = !c.available ? '<div class="llw-card" style="border-color:rgba(255,213,74,.4)"><h3><i class="fa-solid fa-triangle-exclamation" style="color:#ffd54a"></i>Обработчик LesoLidar не готов</h3><div class="llw-sub">' +
+-    esc((c.problems || []).join('; ') || 'Не найден LesoLidar.exe') + '</div><div class="llw-sub" style="margin-top:6px">Просмотр готовых результатов доступен. Как подключить — README_DEPLOY_RU.md, раздел «ЛесоЛидар».</div></div>' : '';
++    esc((c.problems || []).join('; ') || 'Не найден LesoLidar.exe') + '</div>' + (isAdmin() ? setupHtml(c) : '') + '<div class="llw-sub" style="margin-top:6px">Просмотр готовых результатов доступен. Как подключить — README_DEPLOY_RU.md, раздел «ЛесоЛидар».</div></div>' : '';
+   main.innerHTML = engineWarn + '<div class="llw-grid"><div>' +
+     '<section class="llw-card" data-card="cloud"><h3><i class="fa-solid fa-braille"></i>Облако точек (LAS / LAZ)<span class="llw-r llw-sub">обязательно</span></h3><div data-slot="cloud"></div></section>' +
+     '<section class="llw-card"><h3><i class="fa-solid fa-draw-polygon"></i>Контуры лесосеки, выделов и НЭП<span class="llw-r llw-sub">рекомендуется</span></h3><div data-slot="contour"></div></section>' +
+@@ -1317,10 +1328,11 @@
+       var b = k('badge'); b.className = 'llw-badge ' + (ready ? 'ok' : 'warn'); b.textContent = ready ? (c.queue ? 'В работе: ' + c.queue : 'Готов') : 'Не настроен';
+       b.title = ready ? 'Обработчик: ' + (c.engine === 'exe' ? 'LesoLidar.exe' : 'LesoLidar (Python)') : (c.problems || []).join('; ');
+       k('sub').innerHTML = ready ? 'Деревья, породы и запас по облаку LAS/LAZ: мастер в 6 шагов, сводка, пивот, «Учёт деревьев», показ в 3D.'
+-        : '<span style="color:#ffe08a">' + esc((c.problems || [])[0] || 'Обработчик LesoLidar не найден') + '</span>' + (adm ? ' — см. README_DEPLOY_RU, раздел «ЛесоЛидар».' : '');
++        : '<span style="color:#ffe08a">' + esc(problemHead(c, adm)) + '</span>' + (adm ? setupHtml(c) : '');
+       return jobs(true).then(function (list) {
+         if (!document.body.contains(el)) return;
+         var btns = '';
++        if (adm && !ready) btns += '<button type="button" data-b="recheck" title="Проверить снова, найден ли LesoLidar.exe (после копирования программы перезапуск не нужен)"><i class="fa-solid fa-rotate"></i> Проверить снова</button>';
+         if (adm) btns += '<button type="button" class="pri" data-b="new"><i class="fa-solid fa-plus"></i> Новая обработка</button>';
+         if (adm && c.demo) btns += '<button type="button" data-b="demo" title="Сгенерировать тестовое облако в центре карты и обработать его"><i class="fa-solid fa-flask"></i> Демо-участок</button>';
+         btns += '<button type="button" data-b="hist"><i class="fa-solid fa-list-check"></i> Мои обработки<b>' + list.length + '</b></button>';
+@@ -1346,6 +1358,7 @@
+       if (b.dataset.b === 'new') openWizard(wctx(), { fresh: !(S.wiz && !S.wiz.job && S.wiz.step < 4 && S.wiz.ctx && S.wiz.ctx.from === 'picker') });
+       if (b.dataset.b === 'demo') openWizard(wctx(), { fresh: true, demo: true });
+       if (b.dataset.b === 'hist') openHistory();
++      if (b.dataset.b === 'recheck') { b.disabled = true; caps('recheck').then(function (c) { toast(c.available ? 'ЛесоЛидар найден — можно запускать обработку' : 'LesoLidar.exe пока не найден', !c.available); }, function () {}).then(P.render); }
+     } else if (li) openJob(li.dataset.jid);
+   });
+   ['pointerdown', 'wheel', 'keydown'].forEach(function (ev) { el.addEventListener(ev, function (e) { e.stopPropagation(); }); });
+--- v20.9/static/manuals-workspace.js
++++ v20.10/static/manuals-workspace.js
+@@ -68,7 +68,7 @@
+  if(body!==null&&body!==undefined)paper(body,false);
+  else if(doc.f.ext==='.pdf')main.querySelector('#mw-stage').innerHTML='<iframe class="mw-pdf" title="'+esc(doc.f.name)+'" src="/api/manuals/files/'+encodeURIComponent(doc.fid)+'/raw?v='+encodeURIComponent(doc.f.ver||1)+'#view=FitH"></iframe>';
+  else main.querySelector('#mw-stage').innerHTML='<div class="mw-placeholder"><h3>Не удалось открыть текст документа</h3><p>'+esc(doc.sourceError||'Для старого формата DOC загрузите версию DOCX или создайте отдельную веб-редакцию.')+'</p>'+button('Повторить загрузку','reload')+'</div>';
+- if(!doc.apiReady&&B.admin)notice('Чтение доступно, но сервер редакций не подключён или недоступен. Установите модуль manuals_editor_api и перезапустите приложение.','warn');
++ if(!doc.apiReady&&B.admin)notice('Чтение доступно, но сервер редакций не отвечает'+(doc.apiError?' ('+doc.apiError+')':'')+'. Проверьте, что файл manuals_editor_api.py (v20.10) лежит рядом с app.py, и перезапустите приложение — README_DEPLOY_RU, раздел «Редактор методичек».','warn');
+  else if(doc.edition.revision&&String(doc.edition.source_ver)!==String(doc.f.ver||1))notice('Исходный файл обновлён после этой веб-редакции. Проверьте изменения перед публикацией новых правок.','warn');
+  else {var draft=getDraft(doc.fid);if(draft&&B.admin)notice('В этом браузере есть несохранённый черновик.','warn',button('Восстановить','restore-draft')+button('Удалить черновик','delete-draft'));}
+  if(window.ManualsV18)window.ManualsV18.reader(doc);
+@@ -80,11 +80,11 @@
+  main.innerHTML='<div class="mw-placeholder" role="status"><h3>Открываю методичку…</h3><p>'+esc(x.f.name)+'</p></div>';
+  var results=await Promise.all([http(endpoint(fid)).then(function(e){return {ok:true,data:e};}).catch(function(e){return {ok:false,error:e};}),x.f.ext==='.docx'?http('/api/manuals/files/'+encodeURIComponent(fid)+'/html?v='+encodeURIComponent(x.f.ver||1)).then(function(d){return {html:clean(d.html||'')};}).catch(function(e){return {html:null,error:e.message};}):Promise.resolve({html:null})]);
+  if(ticket!==seq)return false;
+- doc={fid:fid,f:x.f,m:x.m,edition:results[0].ok?results[0].data:{revision:0,html:null},revision:results[0].ok?results[0].data.revision:0,apiReady:results[0].ok,source:results[1].html,sourceError:results[1].error,editing:false,dirty:false,saving:false};
++ doc={fid:fid,f:x.f,m:x.m,edition:results[0].ok?results[0].data:{revision:0,html:null},revision:results[0].ok?results[0].data.revision:0,apiReady:results[0].ok,apiError:results[0].ok?'':String(results[0].error&&results[0].error.status?'код '+results[0].error.status:(results[0].error&&results[0].error.message)||''),source:results[1].html,sourceError:results[1].error,editing:false,dirty:false,saving:false};
+  renderReader();if(edit)beginEdit();return true;
+ }
+ function beginEdit(restored){
+- if(!doc||!B.admin)return;if(!doc.apiReady){B.toast('Сервер редакций не подключён. Выполните установку по README.',true);return;}
++ if(!doc||!B.admin)return;if(!doc.apiReady){B.toast('Сервер редакций не подключён: положите manuals_editor_api.py рядом с app.py и перезапустите приложение (README_DEPLOY_RU, «Редактор методичек»).',true);return;}
+  if(doc.editing)return;
+  var body=restored?restored.html:doc.edition.revision?doc.edition.html:doc.source;
+  if(body===null||body===undefined){if(!confirm('Этот файл нельзя редактировать как Word в браузере. Создать отдельную текстовую веб-редакцию? Исходный PDF/DOC не изменится.'))return;body='<h1>'+esc(doc.f.name.replace(/\.(docx?|pdf)$/i,''))+'</h1><p>Текст методички…</p>';}

@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="ru" data-season="{{ season if season is defined else '' }}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="csrf-token" content="{{ csrf_token or '' }}">
+<title>Методички — Геопортал ОДЗиМЛ</title>
+
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --acc:#2a7219;--acc-l:#39961f;--acc-g:#4ab82f;--acc-f:#eaf5e6;--acc-m:#bad4b2;
+  --sb:#141e14;--sb2:#1a281a;--sb3:#203020;--sb-t:#e3eee0;--sb-m:#8fa88a;
+  --bg:#eff3ee;--bg-c:#f6faf5;--card:#fff;--line:#dfe8dc;--txt:#1c2a1c;--muted:#6b7d68;
+  --gold:#e2b640;--pdf:#d64545;--doc:#2f6fd6;--danger:#c62828;
+  --r:12px;--sh:0 10px 30px -12px rgba(20,40,20,.25);
+}
+html,body{height:100%}
+body{font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--txt);display:flex;flex-direction:column;overflow:hidden}
+button{font-family:inherit;cursor:pointer}
+/* ── Шапка ── */
+.top{height:52px;flex-shrink:0;background:var(--sb);display:flex;align-items:center;gap:12px;padding:0 16px;color:var(--sb-t);border-bottom:1px solid #000;position:relative;z-index:20}
+.top a.nav{color:var(--acc-g);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:700;padding:6px 8px;border-radius:8px}
+.top a.nav:hover{background:rgba(255,255,255,.06)}
+.top .logo{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(135deg,#2c5a1d,#163214);color:var(--gold);box-shadow:inset 0 0 0 1px rgba(226,182,64,.45)}
+.top h1{font-size:17px;font-weight:800;letter-spacing:.2px;white-space:nowrap}
+.top h1 small{display:block;font-size:10.5px;font-weight:600;color:var(--sb-m);letter-spacing:.6px;text-transform:uppercase}
+.top .search{flex:1;max-width:460px;margin-left:auto;position:relative}
+.top .search input{width:100%;height:34px;border-radius:10px;border:1px solid #2c3d2c;background:var(--sb2);color:var(--sb-t);padding:0 12px 0 34px;font:500 13px Inter;outline:none}
+.top .search input:focus{border-color:var(--acc-g)}
+.top .search i{position:absolute;left:12px;top:10px;font-size:13px;color:var(--sb-m)}
+.chip-adm{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:800;color:var(--gold);background:rgba(226,182,64,.12);border:1px solid rgba(226,182,64,.4);padding:5px 10px;border-radius:999px;white-space:nowrap}
+.btn{text-decoration:none;display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 14px;border-radius:10px;border:1px solid transparent;font-size:13px;font-weight:700;white-space:nowrap;transition:.15s}
+.btn-acc{background:var(--acc-l);color:#fff;box-shadow:0 4px 14px -6px var(--acc-l)}
+.btn-acc:hover{background:var(--acc-g)}
+.btn-ghost{background:#fff;border-color:var(--line);color:var(--txt)}
+.btn-ghost:hover{border-color:var(--acc-m);background:var(--acc-f)}
+.btn-danger{background:#fff;border-color:#f1c9c9;color:var(--danger)}
+.btn-danger:hover{background:#fdeeee}
+.btn-sm{height:30px;padding:0 10px;font-size:12px;border-radius:8px}
+.btn-ico{width:34px;padding:0;justify-content:center}
+.burger{display:none;background:none;border:0;color:var(--sb-t);font-size:18px;width:34px;height:34px}
+/* ── Каркас ── */
+.wrap{flex:1;display:flex;min-height:0}
+.side{width:360px;flex-shrink:0;background:var(--sb);color:var(--sb-t);display:flex;flex-direction:column;min-height:0;border-right:1px solid #000}
+.side-h{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;font-size:11px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--sb-m)}
+.side-list{flex:1;overflow:auto;padding:0 10px 16px}
+.side-list::-webkit-scrollbar{width:8px}.side-list::-webkit-scrollbar-thumb{background:#2c3d2c;border-radius:8px}
+.mn{border:1px solid #233423;background:var(--sb2);border-radius:12px;margin-bottom:10px;transition:border-color .2s,box-shadow .2s}
+.mn.drag{border-color:var(--acc-g);box-shadow:0 0 0 3px rgba(74,184,47,.25)}
+.mn-h{display:flex;align-items:flex-start;gap:10px;padding:12px 12px 10px;cursor:pointer;user-select:none}
+.mn-h .chev{margin-top:3px;font-size:11px;color:var(--sb-m);transition:transform .2s;width:12px}
+.mn.open .chev{transform:rotate(90deg)}
+.mn-h .mt{flex:1;min-width:0}
+.mn-h .mt b{display:block;font-size:14px;font-weight:800;line-height:1.3;color:#f2f7ef;word-break:break-word}
+.mn-h .mt small{display:block;font-size:11.5px;color:var(--sb-m);margin-top:3px;line-height:1.35}
+.mn-h .cnt{font-size:11px;font-weight:800;color:var(--acc-g);background:rgba(74,184,47,.12);border-radius:999px;padding:2px 8px;margin-top:1px}
+.mn-tools{display:flex;gap:4px;padding:0 12px 10px 34px;flex-wrap:wrap}
+.tl{height:26px;min-width:26px;padding:0 8px;border-radius:7px;border:1px solid #2c3d2c;background:transparent;color:var(--sb-m);font-size:11.5px;font-weight:700;display:inline-flex;align-items:center;gap:6px}
+.tl:hover{color:#fff;border-color:var(--acc-g);background:rgba(74,184,47,.12)}
+.tl.del:hover{border-color:#e57373;color:#ffb4b4;background:rgba(229,115,115,.12)}
+.mn-files{display:none;padding:0 8px 8px}
+.mn.open .mn-files{display:block}
+.fr{display:flex;align-items:center;gap:10px;padding:8px 8px;border-radius:9px;cursor:pointer;position:relative}
+.fr:hover{background:var(--sb3)}
+.fr.on{background:linear-gradient(90deg,rgba(74,184,47,.22),rgba(74,184,47,.06));box-shadow:inset 3px 0 0 var(--acc-g)}
+.fi{width:30px;height:36px;border-radius:6px;display:grid;place-items:center;flex-shrink:0;font-size:9px;font-weight:900;color:#fff;position:relative;letter-spacing:.3px}
+.fi.pdf{background:var(--pdf)}.fi.docx,.fi.doc{background:var(--doc)}
+.fi::after{content:"";position:absolute;top:0;right:0;border-style:solid;border-width:0 8px 8px 0;border-color:transparent rgba(255,255,255,.55) transparent transparent}
+.fr .fn{flex:1;min-width:0}
+.fr .fn b{display:block;font-size:12.5px;font-weight:600;line-height:1.3;color:#e9f1e6;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.fr .fn small{font-size:11px;color:var(--sb-m)}
+.fr .fx{display:flex;gap:2px;opacity:0;transition:opacity .15s}
+.fr:hover .fx,.fr.on .fx{opacity:1}
+.fr .fx button,.fr .fx a{width:26px;height:26px;border-radius:7px;border:0;background:transparent;color:var(--sb-m);display:grid;place-items:center;font-size:12px;text-decoration:none}
+.fr .fx button:hover,.fr .fx a:hover{background:rgba(255,255,255,.08);color:#fff}
+.drop{margin:4px 4px 2px;border:1.5px dashed #34503a;border-radius:10px;padding:12px;text-align:center;color:var(--sb-m);font-size:12px;cursor:pointer;transition:.2s}
+.drop:hover,.mn.drag .drop{border-color:var(--acc-g);color:#d8f3cc;background:rgba(74,184,47,.08)}
+.drop i{font-size:18px;display:block;margin-bottom:5px;color:var(--acc-g)}
+.empty-f{font-size:12px;color:var(--sb-m);padding:6px 10px 10px}
+.up{margin:6px 6px 4px;font-size:11.5px;color:#d8f3cc}
+.up .bar{height:5px;border-radius:5px;background:#2c3d2c;overflow:hidden;margin-top:5px}
+.up .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc-l),var(--acc-g));transition:width .15s}
+/* ── Основная часть ── */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;position:relative}
+.vt{flex-shrink:0;display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--bg-c);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.vt .ttl{flex:1;min-width:200px;display:flex;align-items:center;gap:12px}
+.vt .ttl .fi{width:32px;height:40px;font-size:9.5px}
+.vt .ttl b{display:block;font-size:14.5px;font-weight:800;line-height:1.3;word-break:break-word}
+.vt .ttl small{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+.vt .acts{display:flex;gap:6px;flex-wrap:wrap}
+.prog{position:absolute;left:0;right:0;height:3px;background:transparent;z-index:5}
+.prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc-l),var(--gold))}
+.vb{flex:1;min-height:0;position:relative;display:flex}
+.vb iframe{flex:1;border:0;width:100%;height:100%;background:#525659}
+.doc-scroll{flex:1;overflow:auto;scroll-behavior:smooth;padding:28px 24px 80px}
+.doc-scroll::-webkit-scrollbar{width:12px}.doc-scroll::-webkit-scrollbar-thumb{background:#c5d3c1;border-radius:10px;border:3px solid var(--bg)}
+.paper{max-width:880px;margin:0 auto;background:#fff;border-radius:14px;box-shadow:var(--sh);padding:56px 64px 64px;font-family:'Source Serif 4',Georgia,serif;font-size:calc(16.5px * var(--z,1));line-height:1.65;color:#1f2a1f}
+.paper h1.doc-title{font-family:Inter;font-size:1.75em;font-weight:900;line-height:1.25;color:#173d12;margin-bottom:.7em;padding-bottom:.5em;border-bottom:3px solid var(--acc-f)}
+.paper h2{font-family:Inter;font-size:1.3em;font-weight:800;color:#1e5414;margin:1.6em 0 .55em;scroll-margin-top:16px}
+.paper h3{font-family:Inter;font-size:1.12em;font-weight:800;color:#24601a;margin:1.3em 0 .45em;scroll-margin-top:16px}
+.paper h4{font-family:Inter;font-size:1em;font-weight:800;margin:1.1em 0 .4em;scroll-margin-top:16px}
+.paper p{margin:.55em 0}
+.paper p.empty{height:.4em}
+.paper p.note{background:#f2f6ef;border-left:4px solid var(--acc-g);padding:.8em 1em;border-radius:0 10px 10px 0;font-size:.95em}
+.paper ul,.paper ol{margin:.5em 0 .7em 1.5em}
+.paper li{margin:.25em 0}.paper li::marker{color:var(--acc-l)}
+.paper img{max-width:100%;height:auto;display:block;margin:1em auto;border-radius:8px;box-shadow:0 6px 22px -10px rgba(0,0,0,.35);cursor:zoom-in;border:1px solid #e3e9e1}
+.paper .tab{display:inline-block;width:2em}
+.paper a{color:var(--acc)}
+.paper .tbl{overflow:auto;margin:1em 0}
+.paper table{border-collapse:collapse;width:100%;font-size:.92em;font-family:Inter}
+.paper td{border:1px solid #d7e2d3;padding:.5em .7em;vertical-align:top}
+.paper tr:first-child td{background:#f1f7ee;font-weight:700}
+.paper td p{margin:.15em 0}
+.toc{width:250px;flex-shrink:0;overflow:auto;padding:28px 16px 40px 0;font-size:12.5px}
+.toc h5{font-size:10.5px;font-weight:800;letter-spacing:1.1px;text-transform:uppercase;color:var(--muted);margin:0 0 10px 12px}
+.toc a{display:block;padding:6px 10px 6px 12px;border-left:2px solid var(--line);color:#41553e;text-decoration:none;line-height:1.35}
+.toc a.l3{padding-left:24px;font-size:12px}.toc a.l4{padding-left:34px;font-size:11.5px}
+.toc a:hover{color:var(--acc);background:var(--acc-f)}
+.toc a.on{border-left-color:var(--acc-g);color:var(--acc);font-weight:700;background:var(--acc-f)}
+@media (max-width:1250px){.toc{display:none}}
+.zoom{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}
+.zoom button{border:0;background:none;width:32px;height:32px;font-size:12px;color:var(--txt)}
+.zoom button:hover{background:var(--acc-f)}
+.zoom span{font-size:11.5px;font-weight:700;align-self:center;min-width:38px;text-align:center;color:var(--muted)}
+/* ── Приветствие / карточки ── */
+.home{flex:1;overflow:auto;padding:34px 34px 60px}
+.hero{max-width:1100px;margin:0 auto 26px;display:flex;align-items:center;gap:18px}
+.hero .big{width:62px;height:62px;border-radius:18px;background:linear-gradient(135deg,#2f6a1f,#163214);display:grid;place-items:center;color:var(--gold);font-size:26px;box-shadow:var(--sh)}
+.hero h2{font-size:24px;font-weight:900;color:#173d12}
+.hero p{font-size:13.5px;color:var(--muted);margin-top:4px;max-width:640px;line-height:1.5}
+.cards{max-width:1100px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:0 2px 0 rgba(0,0,0,.02);transition:.2s;display:flex;flex-direction:column;gap:10px}
+.card:hover{border-color:var(--acc-m);box-shadow:var(--sh);transform:translateY(-2px)}
+.card h3{font-size:15.5px;font-weight:800;line-height:1.3;color:#173d12}
+.card p{font-size:12.5px;color:var(--muted);line-height:1.45}
+.card .cf{display:flex;flex-direction:column;gap:4px}
+.card .cf a{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:9px;text-decoration:none;color:var(--txt);font-size:12.5px;font-weight:600}
+.card .cf a:hover{background:var(--acc-f)}
+.card .cf .fi{width:22px;height:27px;font-size:7px}
+.card .cf a span:not(.fi){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.blank{max-width:520px;margin:60px auto;text-align:center;color:var(--muted)}
+.blank i{font-size:44px;color:var(--acc-m);margin-bottom:14px}
+.blank h3{color:var(--txt);font-size:18px;margin-bottom:6px}
+.na{margin:auto;text-align:center;color:var(--muted);padding:40px}
+.na i{font-size:46px;color:var(--doc);margin-bottom:12px}
+.loader{margin:auto;color:var(--muted);font-size:13px;display:flex;align-items:center;gap:10px}
+/* ── Модалки, тосты, лайтбокс ── */
+.ov{position:fixed;inset:0;background:rgba(10,20,10,.5);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;z-index:100;padding:16px}
+.ov.on{display:flex}
+.dlg{background:#fff;border-radius:16px;width:min(520px,100%);box-shadow:0 30px 80px -20px rgba(0,0,0,.5);overflow:hidden;animation:pop .18s ease-out}
+@keyframes pop{from{transform:scale(.96);opacity:0}}
+.dlg-h{padding:18px 20px 6px;font-size:16px;font-weight:800;display:flex;align-items:center;gap:10px}
+.dlg-h i{color:var(--acc-l)}
+.dlg-b{padding:8px 20px 4px;font-size:13.5px;color:#41553e;line-height:1.5}
+.dlg-b label{display:block;font-size:12px;font-weight:700;color:var(--muted);margin:10px 0 5px}
+.dlg-b input,.dlg-b textarea{width:100%;border:1.5px solid var(--line);border-radius:10px;padding:10px 12px;font:500 14px Inter;outline:none;resize:vertical}
+.dlg-b input:focus,.dlg-b textarea:focus{border-color:var(--acc-g);box-shadow:0 0 0 3px rgba(74,184,47,.15)}
+.dlg-f{display:flex;justify-content:flex-end;gap:8px;padding:16px 20px 18px}
+.toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;z-index:200;align-items:center}
+.toast{background:#173018;color:#eaf7e4;padding:10px 16px;border-radius:12px;font-size:13px;font-weight:600;box-shadow:0 10px 30px -10px rgba(0,0,0,.5);display:flex;gap:9px;align-items:center;animation:pop .2s}
+.toast.err{background:#5b1616}
+.lb{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:150;display:none;align-items:center;justify-content:center;cursor:zoom-out;padding:24px}
+.lb.on{display:flex}.lb img{max-width:100%;max-height:100%;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.main.full{position:fixed;inset:0;z-index:90;background:var(--bg)}
+@media (max-width:900px){
+  .burger{display:inline-block}
+  .side{position:fixed;top:52px;bottom:0;left:0;z-index:30;transform:translateX(-100%);transition:transform .25s;width:min(360px,88vw)}
+  body.side-on .side{transform:none;box-shadow:20px 0 50px rgba(0,0,0,.4)}
+  .top .search{display:none}.top h1 small{display:none}
+  .paper{padding:28px 20px 36px}.doc-scroll{padding:14px 8px 60px}
+  .home{padding:20px 14px}
+}
+</style>
+<link rel="stylesheet" href="/static/manuals-workspace.css?v=manuals-v7">
+<script src="/static/scene-season.js?v=independent-v15"></script>
+<script src="/static/design-system-v15.js?v=independent-v15"></script>
+<link rel="stylesheet" href="/static/design-system-v15.css?v=independent-v15">
+<link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+<link rel="stylesheet" href="/static/manuals-v18.css?v=v18-manuals1">
+<script src="/static/geoservice-help-data.js?v=independent-v15"></script>
+<script src="/static/guide-hub.js?v=independent-v15"></script>
+<script defer src="/static/future-icons.js?v=independent-v15"></script>
+<script defer src="/static/brand-logo.js?v=independent-v15"></script>
+<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
+<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+</head>
+<body class="mv18">
+<div class="top">
+  <button class="burger" id="burger" title="Список методичек"><i class="fa-solid fa-bars"></i></button>
+  <a class="nav" href="/messages" title="К сообщениям"><i class="fa-solid fa-chevron-left"></i><i class="fa-solid fa-comments"></i></a>
+  <a class="nav" href="/" title="На карту"><i class="fa-solid fa-map"></i></a>
+  <div class="logo"><i class="fa-solid fa-book-open"></i></div>
+  <h1>Методички<small>Геопортал ОДЗиМЛ · инструкции и гайды</small></h1>
+  <div class="search" role="search"><i aria-hidden="true"><svg class="mv-i" viewBox="0 0 24 24" focusable="false"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></i><input id="q" placeholder="Найти методичку, программу или тему…" autocomplete="off" aria-label="Поиск по методичкам" enterkeyhint="search"><kbd class="mv-kbd" aria-hidden="true" title="Нажмите / для поиска">/</kbd><button type="button" class="mv-qx" id="qx" aria-label="Очистить поиск" title="Очистить" hidden><svg class="mv-i" viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+  {% if is_admin %}
+  <span class="chip-adm" title="Режим администратора"><i class="fa-solid fa-user-shield" aria-hidden="true"></i> Режим администратора</span>
+  <button class="btn btn-acc" id="btnNew" aria-label="Новая методичка" title="Новая методичка"><i class="fa-solid fa-plus" aria-hidden="true"></i><span>Новая методичка</span></button>
+  {% endif %}
+</div>
+<div class="wrap">
+  <aside class="side">
+    <div class="side-h"><span><i class="fa-solid fa-layer-group"></i>&nbsp; Методички</span><span id="sideCount"></span></div>
+    <div class="mv-side-guide">
+      <span class="mv-sg-ico" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg></span>
+      <span class="mv-sg-t"><strong>Руководство пользователя</strong><small>Сценарии работы с геопорталом</small></span>
+      <div class="mv-sg-links"><a href="/static/geoservice_user_guide.html" target="_blank" rel="noopener" aria-label="Открыть руководство пользователя в новой вкладке">Открыть ↗</a><a href="/static/geoservice_user_guide.html#print-version" target="_blank" rel="noopener" aria-label="Руководство пользователя — версия для печати">Для печати</a></div>
+    </div>
+    <div class="side-list" id="list"><div class="empty-f">Загрузка…</div></div>
+  </aside>
+  <main class="main" id="main"></main>
+</div>
+<div class="ov" id="ov"><div class="dlg" id="dlg"></div></div>
+<div class="lb" id="lb"><img alt=""></div>
+<div class="toasts" id="toasts"></div>
+<input type="file" id="picker" multiple accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+<script>window.MN_ADMIN = {{ 'true' if is_admin else 'false' }};</script>
+{% raw %}
+<script>
+(function(){
+'use strict';
+var ADMIN = !!window.MN_ADMIN;
+var $ = function(s, r){ return (r||document).querySelector(s); };
+var list = $('#list'), main = $('#main');
+var S = { manuals: [], cur: null, q: '', open: {}, zoom: 1, maxMb: 200 };
+try { S.open = JSON.parse(localStorage.getItem('mn_open') || '{}'); } catch(e) {}
+try { S.zoom = parseFloat(localStorage.getItem('mn_zoom')) || 1; } catch(e) {}
+
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function size(n){ return n < 1024 ? n + ' Б' : n < 1048576 ? (n/1024).toFixed(0) + ' КБ' : (n/1048576).toFixed(1).replace('.', ',') + ' МБ'; }
+function date(s){ if(!s) return ''; var m = s.match(/^(\d{4})-(\d\d)-(\d\d)/); return m ? m[3]+'.'+m[2]+'.'+m[1] : s; }
+function extLabel(e){ return (e||'').replace('.','').toUpperCase(); }
+function csrf(){ var m = document.querySelector('meta[name="csrf-token"]'); return m ? m.content : ''; }
+function toast(msg, err){ var t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.innerHTML = '<i class="fa-solid ' + (err ? 'fa-triangle-exclamation' : 'fa-circle-check') + '"></i>' + esc(msg); $('#toasts').appendChild(t); setTimeout(function(){ t.remove(); }, err ? 5000 : 2800); }
+function api(method, url, body){
+  return fetch(url, { method: method, credentials: 'same-origin',
+    headers: Object.assign({ 'X-CSRFToken': csrf(), 'X-Requested-With': 'fetch' }, body ? { 'Content-Type': 'application/json' } : {}),
+    body: body ? JSON.stringify(body) : undefined })
+  .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(d){ if(!r.ok) throw new Error(d.detail || ('Ошибка ' + r.status)); return d; }); });
+}
+function findFile(fid){ for (var i=0;i<S.manuals.length;i++){ var m=S.manuals[i]; for (var j=0;j<(m.files||[]).length;j++) if (m.files[j].id===fid) return {m:m, f:m.files[j]}; } return null; }
+function saveOpen(){ try { localStorage.setItem('mn_open', JSON.stringify(S.open)); } catch(e) {} }
+function match(m){
+  if (!S.q) return { show: true, files: m.files || [] };
+  var MM = window.ManualsMeta;
+  if (MM) {
+    var tk = MM.tokens(S.q);
+    if (!tk.length) return { show: true, files: m.files || [] };
+    var hit = MM.pick ? MM.pick(m, tk) : (m.files||[]).filter(function(f){ return MM.hits(MM.hay(m, f), tk); });
+    return { show: hit.length > 0 || MM.hits(MM.norm(m.title + ' ' + (m.desc||'')), tk), files: hit };
+  }
+  var q = S.q.toLowerCase(), hitM = (m.title + ' ' + (m.desc||'')).toLowerCase().indexOf(q) >= 0;
+  var fs = (m.files||[]).filter(function(f){ return hitM || f.name.toLowerCase().indexOf(q) >= 0; });
+  return { show: hitM || fs.length > 0, files: fs };
+}
+
+/* ── загрузка списка ── */
+function load(keep){
+  return fetch('/api/manuals', { credentials: 'same-origin', cache: 'no-store' }).then(function(r){ return r.json(); }).then(function(d){
+    S.manuals = d.manuals || []; if (d.limits) S.maxMb = d.limits.max_mb;
+    renderList();
+    if (!keep) route();
+    else if (!S.cur) renderHome();
+  }).catch(function(){ list.innerHTML = '<div class="empty-f">Не удалось загрузить список методичек</div>'; });
+}
+
+/* ── боковой список ── */
+function ic(n, fa){ return window.ManualsMeta ? window.ManualsMeta.ico(n) : '<i class="fa-solid ' + fa + '"></i>'; }
+function renderList(){
+  var total = 0, h = '', MM = window.ManualsMeta, tk = MM && S.q ? MM.tokens(S.q) : [];
+  S.manuals.forEach(function(m, idx){
+    var r = match(m); if (!r.show) return;
+    total++;
+    var open = S.q ? true : (S.open[m.id] !== false);
+    h += '<section class="mn' + (open ? ' open' : '') + '" data-mid="' + esc(m.id) + '">' +
+      '<div class="mn-h" data-act="toggle" role="button" tabindex="0" aria-expanded="' + open + '"><i class="chev" aria-hidden="true">' + ic('chevR', 'fa-chevron-right') + '</i><div class="mt"><b>' + (MM ? MM.hl(m.title, tk) : esc(m.title)) + '</b>' + (m.desc ? '<small>' + esc(m.desc) + '</small>' : '') + '</div><span class="cnt" title="Файлов в разделе">' + (S.q ? r.files.length : (m.files||[]).length) + '</span></div>';
+    if (ADMIN) h += '<div class="mn-tools">' +
+      '<button class="tl" data-act="add" title="Добавить файлы">' + ic('filePlus', 'fa-file-circle-plus') + ' Файлы</button>' +
+      '<button class="tl" data-act="edit" title="Переименовать раздел" aria-label="Переименовать раздел">' + ic('pen', 'fa-pen') + '</button>' +
+      '<button class="tl" data-act="up" title="Выше" aria-label="Переместить раздел выше"' + (idx===0?' disabled':'') + '>' + ic('arrowUp', 'fa-arrow-up') + '</button>' +
+      '<button class="tl" data-act="down" title="Ниже" aria-label="Переместить раздел ниже"' + (idx===S.manuals.length-1?' disabled':'') + '>' + ic('arrowDown', 'fa-arrow-down') + '</button>' +
+      '<button class="tl del" data-act="del" title="Удалить раздел" aria-label="Удалить раздел">' + ic('trash', 'fa-trash') + '</button></div>';
+    h += '<div class="mn-files">';
+    if (!r.files.length && !ADMIN) h += '<div class="empty-f">Файлов пока нет</div>';
+    r.files.forEach(function(f, j){
+      var p = MM ? MM.parse(f.name, f.ext) : null, X = extLabel(f.ext), on = S.cur === f.id;
+      var badge = p ? '<span class="mv-fi s-' + p.soft + ' x-' + esc(p.x) + (p.num != null ? '' : ' is-x') + '" aria-hidden="true">' + (p.num != null ? p.num : esc(X)) + '</span>'
+                    : '<span class="fi ' + esc(f.ext.slice(1)) + '">' + esc(X) + '</span>';
+      var title = p ? (p.num != null ? '<span class="mv-sr">' + esc((p.kind || '№') + ' ' + p.num) + '. </span>' : '') + MM.hl(p.title, tk)
+                    : esc(f.name.replace(/\.(pdf|docx?)$/i, ''));
+      h += '<div class="fr' + (on ? ' on' : '') + '" data-fid="' + esc(f.id) + '" data-act="open" title="' + esc(f.name) + '">' + badge +
+        '<a class="fn" href="#f=' + encodeURIComponent(f.id) + '"' + (on ? ' aria-current="page"' : '') + '><b>' + title + '</b><small>' + (p && p.num != null ? esc(X) + ' · ' : '') + size(f.size) + ' · ' + date(f.uploaded) + '</small></a>' +
+        '<span class="fx"><a href="/api/manuals/files/' + encodeURIComponent(f.id) + '/download" title="Скачать" aria-label="Скачать ' + esc(f.name) + '" data-act="dl">' + ic('download', 'fa-download') + '</a>' +
+        (ADMIN && !S.q ? '<button data-act="fup" title="Выше" aria-label="Переместить файл выше"' + (j===0?' disabled':'') + '>' + ic('arrowUp', 'fa-arrow-up') + '</button><button data-act="fdown" title="Ниже" aria-label="Переместить файл ниже"' + (j===r.files.length-1?' disabled':'') + '>' + ic('arrowDown', 'fa-arrow-down') + '</button>' : '') +
+        '</span></div>';
+    });
+    if (ADMIN) h += '<div class="up" hidden></div><div class="drop" data-act="add" role="button" tabindex="0"><i aria-hidden="true">' + ic('upload', 'fa-cloud-arrow-up') + '</i>Перетащите PDF / Word сюда<br>или нажмите, чтобы выбрать</div>';
+    h += '</div></section>';
+  });
+  if (!total) h = S.q ? '<div class="empty-f">Ничего не найдено</div>' : '<div class="empty-f">' + (ADMIN ? 'Методичек пока нет. Нажмите «Новая методичка».' : 'Методичек пока нет.') + '</div>';
+  list.innerHTML = h;
+  $('#sideCount').textContent = S.manuals.length ? S.manuals.length : '';
+}
+
+list.addEventListener('click', function(e){
+  var el = e.target.closest('[data-act]'); if (!el) return;
+  var act = el.getAttribute('data-act'), sec = el.closest('.mn'), mid = sec && sec.getAttribute('data-mid');
+  var fr = el.closest('.fr'), fid = fr && fr.getAttribute('data-fid');
+  var m = S.manuals.filter(function(x){ return x.id === mid; })[0];
+  if (act === 'dl') { e.stopPropagation(); return; }
+  e.preventDefault(); e.stopPropagation();
+  if (act === 'toggle') { var o = !sec.classList.contains('open'); sec.classList.toggle('open', o); el.setAttribute('aria-expanded', String(o)); S.open[mid] = o; saveOpen(); }
+  else if (act === 'open') { location.hash = 'f=' + fid; document.body.classList.remove('side-on'); }
+  else if (act === 'add') pick(function(files){ upload(mid, files, sec); });
+  else if (act === 'edit') editManual(m);
+  else if (act === 'up' || act === 'down') api('POST', '/api/admin/manuals/' + mid + '/move', { dir: act === 'up' ? -1 : 1 }).then(function(){ load(true); }).catch(function(er){ toast(er.message, true); });
+  else if (act === 'fup' || act === 'fdown') api('POST', '/api/admin/manuals/files/' + fid + '/move', { dir: act === 'fup' ? -1 : 1 }).then(function(){ load(true); }).catch(function(er){ toast(er.message, true); });
+  else if (act === 'del') confirmDlg('Удалить методичку?', 'Методичка «<b>' + esc(m.title) + '</b>» и все её файлы (' + (m.files||[]).length + ') будут удалены без возможности восстановления.', 'Удалить', function(){
+    return api('DELETE', '/api/admin/manuals/' + mid).then(function(){ toast('Методичка удалена'); if (S.cur && !findFile(S.cur)) S.cur = null; return load(true); }).then(function(){ if (S.cur && !findFile(S.cur)) location.hash = ''; });
+  });
+});
+
+list.addEventListener('keydown', function(e){
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  var el = e.target; if (!el.matches || !el.matches('.mn-h[role=button],.drop[role=button]')) return;
+  e.preventDefault(); el.click();
+});
+
+/* drag & drop на методичку */
+if (ADMIN) {
+  list.addEventListener('dragover', function(e){ var sec = e.target.closest('.mn'); if (!sec || !e.dataTransfer || [].indexOf.call(e.dataTransfer.types, 'Files') < 0) return; e.preventDefault(); list.querySelectorAll('.mn.drag').forEach(function(x){ if (x !== sec) x.classList.remove('drag'); }); sec.classList.add('drag'); });
+  list.addEventListener('dragleave', function(e){ var sec = e.target.closest('.mn'); if (sec && !sec.contains(e.relatedTarget)) sec.classList.remove('drag'); });
+  list.addEventListener('drop', function(e){ var sec = e.target.closest('.mn'); if (!sec) return; e.preventDefault(); sec.classList.remove('drag'); if (e.dataTransfer.files.length) upload(sec.getAttribute('data-mid'), e.dataTransfer.files, sec); });
+  window.addEventListener('dragover', function(e){ e.preventDefault(); }); window.addEventListener('drop', function(e){ e.preventDefault(); });
+}
+
+/* ── выбор и загрузка файлов ── */
+var picker = $('#picker'), pickCb = null;
+function pick(cb, multiple){ pickCb = cb; picker.multiple = multiple !== false; picker.value = ''; picker.click(); }
+picker.addEventListener('change', function(){ if (picker.files.length && pickCb) pickCb(picker.files); });
+function checkFiles(files){
+  var ok = [], bad = [];
+  [].forEach.call(files, function(f){ var ext = (f.name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+    if (['.pdf','.doc','.docx'].indexOf(ext) < 0) bad.push(f.name + ' — не PDF/Word');
+    else if (f.size > S.maxMb * 1048576) bad.push(f.name + ' — больше ' + S.maxMb + ' МБ');
+    else ok.push(f); });
+  if (bad.length) toast('Пропущено: ' + bad.join('; '), true);
+  return ok;
+}
+function xhr(url, form, onProg){
+  return new Promise(function(res, rej){
+    var x = new XMLHttpRequest(); x.open('POST', url); x.setRequestHeader('X-CSRFToken', csrf()); x.setRequestHeader('X-Requested-With', 'fetch');
+    x.upload.onprogress = function(e){ if (e.lengthComputable) onProg(e.loaded / e.total); };
+    x.onload = function(){ var d = {}; try { d = JSON.parse(x.responseText); } catch(e) {} if (x.status >= 200 && x.status < 300) res(d); else rej(new Error(d.detail || ('Ошибка ' + x.status))); };
+    x.onerror = function(){ rej(new Error('Сеть недоступна')); };
+    x.send(form);
+  });
+}
+function upload(mid, files, sec, loud){
+  files = checkFiles(files); if (!files.length) return;
+  var fd = new FormData(); files.forEach(function(f){ fd.append('files', f, f.name); });
+  var up = sec && sec.querySelector('.up');
+  if (sec) { sec.classList.add('open'); S.open[mid] = true; saveOpen(); }
+  if (up) { up.hidden = false; up.innerHTML = 'Загрузка ' + files.length + ' файл(ов)… <b>0%</b><div class="bar"><i></i></div>'; }
+  var tt = null;
+  if (loud) { tt = document.createElement('div'); tt.className = 'toast'; tt.setAttribute('role', 'status'); tt.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> Загрузка ' + files.length + ' ' + (files.length % 10 === 1 && files.length % 100 !== 11 ? 'файла' : 'файлов') + '… <b>0%</b>'; $('#toasts').appendChild(tt); }
+  xhr('/api/admin/manuals/' + mid + '/files', fd, function(p){ if (up) { up.querySelector('b').textContent = Math.round(p*100) + '%'; up.querySelector('.bar i').style.width = (p*100) + '%'; } if (tt) tt.querySelector('b').textContent = Math.round(p*100) + '%'; })
+    .then(function(d){ if (tt) tt.remove(); toast('Добавлено файлов: ' + d.files.length); return load(true).then(function(){ if (d.files.length && !S.cur) location.hash = 'f=' + d.files[0].id; }); })
+    .catch(function(e){ if (tt) tt.remove(); toast(e.message, true); if (up) up.hidden = true; });
+}
+function addFiles(mid, files){
+  var sec = list.querySelector('.mn[data-mid="' + mid + '"]');
+  var go = function(fs){ upload(mid, fs, sec, true); };
+  if (files && files.length) go(files); else pick(go);
+}
+function replaceFile(fid){
+  pick(function(files){
+    files = checkFiles(files); if (!files.length) return;
+    var fd = new FormData(); fd.append('file', files[0], files[0].name);
+    var t = document.createElement('div'); t.className = 'toast'; t.innerHTML = '<i class="fa-solid fa-arrows-rotate fa-spin"></i> Замена файла… <b>0%</b>'; $('#toasts').appendChild(t);
+    xhr('/api/admin/manuals/files/' + fid + '/replace', fd, function(p){ t.querySelector('b').textContent = Math.round(p*100) + '%'; })
+      .then(function(){ t.remove(); toast('Файл заменён'); return load(true).then(function(){ openFile(fid, true); }); })
+      .catch(function(e){ t.remove(); toast(e.message, true); });
+  }, false);
+}
+
+/* ── диалоги ── */
+var ov = $('#ov'), dlg = $('#dlg');
+function closeDlg(){ ov.classList.remove('on'); }
+ov.addEventListener('mousedown', function(e){ if (e.target === ov) closeDlg(); });
+document.addEventListener('keydown', function(e){ if (e.key === 'Escape') { closeDlg(); $('#lb').classList.remove('on'); if (main.classList.contains('full')) main.classList.remove('full'); } });
+function formDlg(title, icon, fields, okText, onOk){
+  dlg.innerHTML = '<div class="dlg-h"><i class="fa-solid ' + icon + '"></i>' + esc(title) + '</div><form class="dlg-b" id="dlgForm">' +
+    fields.map(function(f){ return '<label>' + esc(f.label) + '</label>' + (f.area ? '<textarea name="' + f.name + '" rows="3" maxlength="' + (f.max||500) + '" placeholder="' + esc(f.ph||'') + '">' + esc(f.value||'') + '</textarea>' : '<input name="' + f.name + '" maxlength="' + (f.max||200) + '" value="' + esc(f.value||'') + '" placeholder="' + esc(f.ph||'') + '"' + (f.req ? ' required' : '') + '>'); }).join('') +
+    '<button type="submit" hidden></button></form><div class="dlg-f"><button class="btn btn-ghost" data-x>Отмена</button><button class="btn btn-acc" data-ok>' + esc(okText) + '</button></div>';
+  ov.classList.add('on');
+  var form = $('#dlgForm'), first = form.querySelector('input,textarea'); setTimeout(function(){ first.focus(); first.select && first.select(); }, 30);
+  dlg.querySelector('[data-x]').onclick = closeDlg;
+  var submit = function(e){ if (e) e.preventDefault(); var v = {}; fields.forEach(function(f){ v[f.name] = form.elements[f.name].value.trim(); });
+    if (fields.some(function(f){ return f.req && !v[f.name]; })) { form.querySelector('[required]').focus(); return; }
+    var b = dlg.querySelector('[data-ok]'); b.disabled = true;
+    Promise.resolve(onOk(v)).then(closeDlg).catch(function(er){ toast(er.message, true); }).finally(function(){ b.disabled = false; }); };
+  form.onsubmit = submit; dlg.querySelector('[data-ok]').onclick = submit;
+}
+function confirmDlg(title, html, okText, onOk){
+  dlg.innerHTML = '<div class="dlg-h"><i class="fa-solid fa-triangle-exclamation" style="color:var(--danger)"></i>' + esc(title) + '</div><div class="dlg-b">' + html + '</div><div class="dlg-f"><button class="btn btn-ghost" data-x>Отмена</button><button class="btn btn-danger" data-ok><i class="fa-solid fa-trash"></i> ' + esc(okText) + '</button></div>';
+  ov.classList.add('on'); dlg.querySelector('[data-x]').onclick = closeDlg;
+  dlg.querySelector('[data-ok]').onclick = function(){ var b = this; b.disabled = true; Promise.resolve(onOk()).then(closeDlg).catch(function(er){ toast(er.message, true); }).finally(function(){ b.disabled = false; }); };
+}
+function newManual(){
+  formDlg('Новая методичка', 'fa-book-medical', [
+    { name: 'title', label: 'Заголовок', req: true, ph: 'Например: Обработка снимков Sentinel-2' },
+    { name: 'desc', label: 'Описание (необязательно)', area: true, ph: 'Коротко — для кого и о чём' }
+  ], 'Создать', function(v){
+    return api('POST', '/api/admin/manuals', v).then(function(d){ S.open[d.manual.id] = true; saveOpen(); toast('Методичка создана — добавьте файлы'); return load(true).then(function(){
+      var sec = list.querySelector('.mn[data-mid="' + d.manual.id + '"]'); if (sec) { sec.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); setTimeout(function(){ pick(function(files){ upload(d.manual.id, files, list.querySelector('.mn[data-mid="' + d.manual.id + '"]')); }); }, 250); }
+    }); });
+  });
+}
+function editManual(m){
+  formDlg('Методичка', 'fa-pen', [
+    { name: 'title', label: 'Заголовок', req: true, value: m.title },
+    { name: 'desc', label: 'Описание', area: true, value: m.desc }
+  ], 'Сохранить', function(v){ return api('PATCH', '/api/admin/manuals/' + m.id, v).then(function(){ toast('Сохранено'); return load(true).then(function(){ if (S.cur) renderToolbar(); }); }); });
+}
+function renameFile(fid){
+  var x = findFile(fid); if (!x) return;
+  formDlg('Название файла', 'fa-i-cursor', [{ name: 'name', label: 'Имя файла (под ним он скачивается)', req: true, max: 180, value: x.f.name }], 'Сохранить', function(v){
+    return api('PATCH', '/api/admin/manuals/files/' + fid, v).then(function(){ toast('Переименовано'); return load(true).then(function(){ renderToolbar(); }); });
+  });
+}
+function deleteFile(fid){
+  var x = findFile(fid); if (!x) return;
+  confirmDlg('Удалить файл?', 'Файл «<b>' + esc(x.f.name) + '</b>» будет удалён из методички «' + esc(x.m.title) + '».', 'Удалить', function(){
+    return api('DELETE', '/api/admin/manuals/files/' + fid).then(function(){ toast('Файл удалён'); S.cur = null; location.hash = ''; return load(true); });
+  });
+}
+if (ADMIN) $('#btnNew').addEventListener('click', newManual);
+
+/* ── главная (карточки) ── */
+function renderHome(){
+  if(window.ManualsWorkspace) return window.ManualsWorkspace.home();
+  S.cur = null; renderList();
+  var cards = S.manuals.filter(function(m){ return match(m).show; }).map(function(m){
+    var fs = match(m).files;
+    return '<div class="card"><h3>' + esc(m.title) + '</h3>' + (m.desc ? '<p>' + esc(m.desc) + '</p>' : '') +
+      '<div class="cf">' + (fs.length ? fs.map(function(f){ return '<a href="#f=' + f.id + '"><span class="fi ' + f.ext.slice(1) + '">' + extLabel(f.ext) + '</span><span>' + esc(f.name) + '</span><small style="color:var(--muted)">' + size(f.size) + '</small></a>'; }).join('') : '<p>Файлов пока нет</p>') + '</div></div>';
+  }).join('');
+  main.innerHTML = '<div class="home"><div class="hero"><div class="big"><i class="fa-solid fa-book-open-reader"></i></div><div><h2>Методички ОДЗиМЛ</h2><p>Инструкции и гайды по работе с ДЗЗ, ERDAS, ArcMap и геопорталом. Выберите файл — он откроется для чтения прямо здесь; любой файл можно скачать.' +
+    (ADMIN ? ' <b>Администратор:</b> создавайте методички кнопкой «Новая методичка», файлы добавляйте кнопкой «Файлы» или перетаскиванием в блок методички.' : '') + '</p></div></div>' +
+    '<section style="background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px;margin-bottom:24px"><h3 style="font-size:22px;margin-bottom:8px">Руководство пользователя геосервиса</h3><p style="font-size:16px;line-height:1.5;color:var(--muted);margin-bottom:16px">21 пошаговый сценарий: поиск, слои, снимки, измерения, печать и настройки. Онлайн-версия и PDF на подробное руководствоах.</p><div style="display:flex;flex-wrap:wrap;gap:12px"><a href="/static/geoservice_user_guide.html" target="_blank" rel="noopener" class="btn btn-acc" style="min-height:44px;height:auto;font-size:16px;padding:10px 16px">Читать онлайн ↗</a><a href="/static/geoservice_user_guide.html#print-version" download class="btn btn-ghost" style="min-height:44px;height:auto;font-size:16px;padding:10px 16px">Скачать PDF</a></div></section>' +
+    (cards ? '<div class="cards">' + cards + '</div>' : '<div class="blank"><i class="fa-solid fa-book"></i><h3>' + (S.q ? 'Ничего не найдено' : 'Дополнительных методичек пока нет') + '</h3>' + (ADMIN && !S.q ? '<p>Создайте первую методичку и добавьте в неё PDF или Word.</p><br><button class="btn btn-acc" onclick="document.getElementById(\'btnNew\').click()"><i class="fa-solid fa-plus"></i> Новая методичка</button>' : '') + '</div>') + '</div>';
+}
+
+/* ── просмотр файла ── */
+function renderToolbar(){
+  if(window.ManualsWorkspace) return window.ManualsWorkspace.toolbar();
+  var x = findFile(S.cur); if (!x) return;
+  var f = x.f, bar = $('#vt'); if (!bar) return;
+  bar.innerHTML = '<div class="ttl"><span class="fi ' + f.ext.slice(1) + '">' + extLabel(f.ext) + '</span><div><b>' + esc(f.name) + '</b><small><i class="fa-solid fa-book"></i> ' + esc(x.m.title) + ' · ' + size(f.size) + ' · обновлён ' + date(f.uploaded) + '</small></div></div>' +
+    '<div class="acts">' + (f.ext === '.docx' ? '<div class="zoom"><button data-z="-1" title="Мельче"><i class="fa-solid fa-minus"></i></button><span id="zv">' + Math.round(S.zoom*100) + '%</span><button data-z="1" title="Крупнее"><i class="fa-solid fa-plus"></i></button></div>' : '') +
+    '<a class="btn btn-acc" href="/api/manuals/files/' + f.id + '/download"><i class="fa-solid fa-download"></i> Скачать</a>' +
+    (f.ext === '.pdf' ? '<a class="btn btn-ghost btn-ico" href="/api/manuals/files/' + f.id + '/raw" target="_blank" title="Открыть в новой вкладке"><i class="fa-solid fa-up-right-from-square"></i></a>' : '') +
+    '<button class="btn btn-ghost btn-ico" data-a="full" title="Во весь экран"><i class="fa-solid fa-expand"></i></button>' +
+    (ADMIN ? '<button class="btn btn-ghost" data-a="replace" title="Загрузить новую версию вместо этой"><i class="fa-solid fa-arrows-rotate"></i> Заменить</button><button class="btn btn-ghost btn-ico" data-a="rename" title="Переименовать"><i class="fa-solid fa-i-cursor"></i></button><button class="btn btn-danger btn-ico" data-a="delete" title="Удалить файл"><i class="fa-solid fa-trash"></i></button>' : '') +
+    '<button class="btn btn-ghost btn-ico" data-a="close" title="Закрыть"><i class="fa-solid fa-xmark"></i></button></div>';
+}
+main.addEventListener('click', function(e){
+  if(window.ManualsWorkspace) return;
+  var b = e.target.closest('[data-a],[data-z]'); if (!b) { var im = e.target.closest('.paper img'); if (im) { $('#lb img').src = im.src; $('#lb').classList.add('on'); } return; }
+  if (b.hasAttribute('data-z')) { S.zoom = Math.max(.8, Math.min(1.6, Math.round((S.zoom + .1 * +b.getAttribute('data-z'))*10)/10)); localStorage.setItem('mn_zoom', S.zoom); var p = $('.paper'); if (p) p.style.setProperty('--z', S.zoom); $('#zv').textContent = Math.round(S.zoom*100) + '%'; return; }
+  var a = b.getAttribute('data-a');
+  if (a === 'replace') replaceFile(S.cur); else if (a === 'rename') renameFile(S.cur); else if (a === 'delete') deleteFile(S.cur);
+  else if (a === 'full') { main.classList.toggle('full'); b.querySelector('i').className = 'fa-solid ' + (main.classList.contains('full') ? 'fa-compress' : 'fa-expand'); }
+  else if (a === 'close') { main.classList.remove('full'); location.hash = ''; }
+});
+$('#lb').addEventListener('click', function(){ this.classList.remove('on'); });
+
+var openSeq = 0;
+function openFile(fid, force){
+  if(window.ManualsWorkspace) return window.ManualsWorkspace.open(fid,force);
+  var x = findFile(fid);
+  if (!x) { renderHome(); return; }
+  if (S.cur === fid && !force) return;
+  S.cur = fid; S.open[x.m.id] = true; renderList();
+  var row = list.querySelector('.fr[data-fid="' + fid + '"]'); if (row) row.scrollIntoView({ block: 'nearest' });
+  var f = x.f, seq = ++openSeq;
+  main.innerHTML = '<div class="vt" id="vt"></div><div class="prog"><i id="prog"></i></div><div class="vb" id="vb"><div class="loader"><i class="fa-solid fa-spinner fa-spin"></i> Открываю документ…</div></div>';
+  renderToolbar();
+  var vb = $('#vb'), v = '?v=' + (f.ver || 1);
+  if (f.ext === '.pdf') {
+    vb.innerHTML = '<iframe src="/api/manuals/files/' + f.id + '/raw' + v + '#view=FitH" title="' + esc(f.name) + '"></iframe>';
+  } else if (f.ext === '.docx') {
+    fetch('/api/manuals/files/' + f.id + '/html' + v, { credentials: 'same-origin' }).then(function(r){ return r.json().then(function(d){ if (!r.ok) throw new Error(d.detail || 'Ошибка'); return d; }); }).then(function(d){
+      if (seq !== openSeq) return;
+      var toc = (d.toc || []).map(function(t){ return '<a href="#' + t.id + '" class="l' + t.lvl + '" data-h="' + t.id + '">' + esc(t.text) + '</a>'; }).join('');
+      vb.innerHTML = '<div class="doc-scroll" id="ds"><article class="paper" style="--z:' + S.zoom + '">' + d.html + '</article></div>' + (toc ? '<nav class="toc" id="toc"><h5>Содержание</h5>' + toc + '</nav>' : '');
+      wireDoc();
+    }).catch(function(e){ if (seq === openSeq) vb.innerHTML = noView(f, e.message); });
+  } else {
+    // .doc: пробуем PDF-версию (если на сервере есть LibreOffice)
+    fetch('/api/manuals/files/' + f.id + '/raw' + v, { method: 'GET', credentials: 'same-origin' }).then(function(r){
+      if (seq !== openSeq) return;
+      if (r.ok) vb.innerHTML = '<iframe src="/api/manuals/files/' + f.id + '/raw' + v + '#view=FitH"></iframe>';
+      else vb.innerHTML = noView(f, 'Старый формат .doc нельзя показать в браузере.');
+    }).catch(function(){ vb.innerHTML = noView(f, ''); });
+  }
+}
+function noView(f, why){
+  return '<div class="na"><i class="fa-solid fa-file-word"></i><h3 style="color:var(--txt);margin-bottom:6px">Предпросмотр недоступен</h3><p>' + esc(why || '') + ' Скачайте файл, чтобы открыть его в Word.</p>' +
+    (ADMIN && f.ext === '.doc' ? '<p style="margin-top:6px;font-size:12px">Совет: сохраните документ в Word как <b>.docx</b> или <b>PDF</b> и нажмите «Заменить» — тогда он будет читаться прямо на сайте.</p>' : '') +
+    '<br><a class="btn btn-acc" href="/api/manuals/files/' + f.id + '/download"><i class="fa-solid fa-download"></i> Скачать ' + esc(f.name) + '</a></div>';
+}
+function wireDoc(){
+  var ds = $('#ds'), toc = $('#toc'), prog = $('#prog');
+  if (toc) toc.addEventListener('click', function(e){ var a = e.target.closest('a[data-h]'); if (!a) return; e.preventDefault(); var h = document.getElementById(a.getAttribute('data-h')); if (h) ds.scrollTo({ top: h.offsetTop - 12, behavior: 'smooth' }); });
+  var heads = [].slice.call(ds.querySelectorAll('h2[id],h3[id],h4[id]')), raf = 0;
+  var key = 'mn_pos_' + S.cur, saved = +sessionStorage.getItem(key) || 0; if (saved) ds.scrollTop = saved;
+  function onScroll(){ raf = 0;
+    var max = ds.scrollHeight - ds.clientHeight; prog.style.width = (max > 0 ? ds.scrollTop / max * 100 : 100) + '%';
+    try { sessionStorage.setItem(key, ds.scrollTop); } catch(e) {}
+    if (!toc) return; var cur = null;
+    for (var i = 0; i < heads.length; i++) { if (heads[i].offsetTop - ds.scrollTop < 80) cur = heads[i].id; else break; }
+    toc.querySelectorAll('a.on').forEach(function(a){ if (a.getAttribute('data-h') !== cur) a.classList.remove('on'); });
+    if (cur) { var a = toc.querySelector('a[data-h="' + cur + '"]'); if (a && !a.classList.contains('on')) { a.classList.add('on'); a.scrollIntoView({ block: 'nearest' }); } }
+  }
+  ds.addEventListener('scroll', function(){ if (!raf) raf = requestAnimationFrame(onScroll); }); onScroll();
+}
+
+/* ── маршрут по #f=<id> ── */
+function route(){ var m = location.hash.match(/f=([A-Za-z0-9_-]+)/); if (m) openFile(m[1]); else renderHome(); }
+window.addEventListener('hashchange', route);
+
+/* поиск */
+var qt = 0;
+$('#q').addEventListener('input', function(){ var v = this.value.trim(); clearTimeout(qt); qt = setTimeout(function(){ S.q = v; renderList(); if (!S.cur) renderHome(); }, 120); });
+$('#burger').addEventListener('click', function(){ document.body.classList.toggle('side-on'); });
+
+window.ManualsBase = {cancelLegacy:function(){++openSeq;},state:S,main:main,find:findFile,list:renderList,saveOpen:saveOpen,load:load,replace:replaceFile,rename:renameFile,remove:deleteFile,toast:toast,esc:esc,size:size,date:date,admin:ADMIN,addFiles:addFiles,newManual:ADMIN ? newManual : null};
+load();
+})();
+</script>
+{% endraw %}
+<script src="/static/manuals-v18.js?v=v18-manuals1"></script>
+<script src="/static/manuals-workspace.js?v=v18-manuals1"></script>
+</body>
+</html>

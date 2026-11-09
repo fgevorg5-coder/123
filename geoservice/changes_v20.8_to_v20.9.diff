@@ -1,0 +1,1937 @@
+# Геосервис v20.8 → v20.9: построчные изменения (новые файлы — целиком).
+# Не показаны двоичные шрифты static/themes/fonts/*.woff2 (70 файлов) и fonts/OFL.txt (текст лицензии SIL OFL 1.1).
+
+--- a/static/profile-v18.js
++++ b/static/profile-v18.js
+@@ -132,7 +132,7 @@
+           .then(function (r) { return r.ok ? r.json() : null; })
+           .then(function (j) {
+             var cards = (j && j.cards) || {};
+-            chunk.forEach(function (ip) { delete AV.inflight[ip]; avPut(ip, cards[ip]); avRefreshIp(ip); });
++            chunk.forEach(function (ip) { delete AV.inflight[ip]; avPut(ip, cards[ip]); avRefreshIp(ip); if (ip === myIp()) avPublish(); });
+           })
+           .catch(function () {
+             // сеть недоступна — повторим не раньше чем через минуту
+@@ -185,6 +185,12 @@
+     if (root.hasAttribute('data-av-ip')) avDecorate(root);
+     if (root.firstElementChild) $all('[data-av-ip]', root).forEach(avDecorate);
+   }
++  // [v20.9] Свой аватар из «Сообщений» — единственный источник для всех страниц (static/avatar-sync.js):
++  // после загрузки с сервера и после каждого изменения в «Мой профиль» он рассылается в другие вкладки.
++  function avPublish() {
++    var c = AV.cache[myIp()];
++    if (c && window.GeoAvatar && typeof window.GeoAvatar.fromMessages === 'function') { try { window.GeoAvatar.fromMessages(c); } catch (e) {} }
++  }
+   function avSetMine(patch) {
+     var ip = myIp(); if (!ip) return;
+     var c = AV.cache[ip] || { photo: '', frame: 'none', emoji: '' };
+@@ -194,6 +200,7 @@
+       status_emoji: patch.status_emoji !== undefined ? patch.status_emoji : c.emoji
+     });
+     avRefreshIp(ip);
++    avPublish();
+   }
+   // Один наблюдатель на весь документ: messages.js перерисовывает списки через innerHTML
+   var mo = new MutationObserver(function (muts) {
+
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -80,6 +80,7 @@
+          measurement-ui, tool-panels-ui, geoservice-help). Раньше 17 запросов, часть — в конце <body>
+          (из-за этого боковая панель «прыгала» после первой отрисовки, CLS). -->
+     {{ css_bundle('index') }}
++    <link rel="stylesheet" href="/static/avatar-sync.css?v={{ version }}">
+     <style id="bgl-emblem-css">
+ /* [v21] Значок «Белгослес»: один встроенный SVG, без смешивания слоёв и CSS-фильтров (старый значок из 12 слоёв с mix-blend-mode пересчитывался поверх анимированной сцены) */
+ html[lang] .sidebar .fh-emblem.fh-emblem--v21{width:auto!important;height:auto!important;min-width:0!important;min-height:0!important;padding:0!important;margin:0!important;border:0!important;border-radius:0!important;background:none!important;box-shadow:none!important;filter:none!important;animation:none!important;transform:none!important;opacity:1!important;display:flex!important;align-items:center;justify-content:center;flex:0 0 auto!important;overflow:visible!important;position:relative;z-index:2}
+@@ -102,6 +103,8 @@
+ <!-- [v17] Линейные иконки Tabler (MIT) вместо Material «B» -->
+ <script defer src="/static/icons-tabler.js?v=v17"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body>
+ 
+@@ -306,7 +309,7 @@
+                 {% if is_admin %}
+                 <!-- ── АДМИНИСТРАТОР ── -->
+                 <button type="button" class="sf-user-row sf-profile-trigger sf-admin-row" data-sf-profile-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="sf-profile-menu" title="Профиль и общие инструменты">
+-                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar" aria-hidden="true">🌲</span><span class="sf-user-text"><span class="sf-username">Администратор</span></span></span>
++                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar" data-me-avatar data-me-ip="{{ user_ip }}" data-me-name="Администратор" data-me-org="" aria-hidden="true">А</span><span class="sf-user-text"><span class="sf-username">Администратор</span></span></span>
+                     <span class="sf-profile-unread" data-sf-unread-summary hidden aria-live="polite"></span>
+                     <span class="sf-profile-chevron"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 14 4-4 4 4"/></svg></span>
+                 </button>
+@@ -322,7 +325,7 @@
+                 {% elif is_registered %}
+                 <!-- ── ЗАРЕГИСТРИРОВАННЫЙ ПОЛЬЗОВАТЕЛЬ ── -->
+                 <button type="button" class="sf-user-row sf-profile-trigger" data-sf-profile-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="sf-profile-menu" title="Профиль и общие инструменты">
+-                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar" aria-hidden="true">🌲</span><span class="sf-user-text"><span class="sf-username">{{ user_name or "Пользователь" }}</span>{% if organization_name %}<span class="sf-department" title="{{ organization_name }}">{{ organization_name }}</span>{% endif %}</span></span>
++                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar" data-me-avatar data-me-ip="{{ user_ip }}" data-me-name="{{ user_name or 'Пользователь' }}" data-me-org="{{ profile_org or '' }}" aria-hidden="true">{{ (user_name or "Пользователь")[0]|upper }}</span><span class="sf-user-text"><span class="sf-username">{{ user_name or "Пользователь" }}</span>{% if organization_name %}<span class="sf-department" title="{{ organization_name }}">{{ organization_name }}</span>{% endif %}</span></span>
+                     <span class="sf-profile-unread" data-sf-unread-summary hidden aria-live="polite"></span>
+                     <span class="sf-profile-chevron"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 14 4-4 4 4"/></svg></span>
+                 </button>
+@@ -346,7 +349,7 @@
+                 <!-- Блок зарегистрированного пользователя — показывается JS если IP найден -->
+                 <div id="sf-registered-block"{% if not has_profile %} style="display:none;"{% endif %}>
+                     <button type="button" class="sf-user-row sf-profile-trigger" data-sf-profile-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="sf-profile-menu" title="Профиль и общие инструменты">
+-                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar-ip" aria-hidden="true">🌲</span><span class="sf-user-text"><span class="sf-username"><span id="sf-reg-name">{{ profile_name or profile_org }}</span></span><span class="sf-department" id="sf-reg-dept"{% if not profile_org %} style="display:none;"{% endif %}>{{ profile_org }}</span></span></span>
++                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar-ip" data-me-avatar data-me-ip="{{ user_ip }}" data-me-name="{{ profile_name or profile_org or 'Пользователь' }}" data-me-org="{{ profile_org or '' }}" aria-hidden="true">{{ (profile_name or profile_org or "Пользователь")[0]|upper }}</span><span class="sf-user-text"><span class="sf-username"><span id="sf-reg-name">{{ profile_name or profile_org }}</span></span><span class="sf-department" id="sf-reg-dept"{% if not profile_org %} style="display:none;"{% endif %}>{{ profile_org }}</span></span></span>
+                     <span class="sf-profile-unread" data-sf-unread-summary hidden aria-live="polite"></span>
+                     <span class="sf-profile-chevron"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 14 4-4 4 4"/></svg></span>
+                 </button>
+@@ -390,6 +393,7 @@
+ <nav id="sf-profile-menu" class="sf-profile-menu" role="menu" aria-label="Профиль и общие инструменты" hidden>
+ <div class="sf-profile-menu-heading">Общее</div>
+ <a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/messages?openProfile=1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3"/><path d="M5 21v-2a7 7 0 0 1 10-6"/><circle cx="18" cy="17" r="2.5"/><path d="M18 13v1.5m0 5V21m-4-4h1.5m5 0H22"/></svg><span>Настройки профиля</span></a>
++<a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="#appearance" data-gt-open title="Цвета, шрифт и кнопки (Alt+Shift+T)"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 1 9-9c0 1.9-1.4 3-3.1 3H16a2 2 0 0 0-1.5 3.3A1.7 1.7 0 0 1 12 21z"/><circle cx="7.5" cy="11" r="1.1"/><circle cx="10.5" cy="7" r="1.1"/><circle cx="15.5" cy="7.5" r="1.1"/></svg><span>Оформление</span></a>
+ <div class="sf-profile-menu-divider" role="separator"></div>
+ <a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/messages?openTaxatorQueue=1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6M6 17H3V9h18v8h-3"/><path d="M6 14h12v7H6zM17 11h1"/></svg><span>Таксаторы печать</span></a>
+ <a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/messages?openVacancy=1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H5v20h14V7zM14 2v5h5M8 12h8M8 16h6"/></svg><span>Заявление за свой счёт</span></a>
+@@ -401,201 +405,10 @@
+             </div>
+ 
+ 
+-            <!-- ── ПИКЕР ОВЕРЛЕЙ ── -->
+-            <div id="sf-picker-overlay" onclick="if(event.target===this)sfClosePicker()">
+-                <div id="sf-picker-box">
+-                    <div id="sf-picker-tabs">
+-                        <div class="sf-ptab active" onclick="sfTab('emoji')"><i class="fa-solid fa-image" aria-hidden="true"></i> Иконка</div>
+-                        <div class="sf-ptab" onclick="sfTab('photo')"><i class="fa-solid fa-camera" aria-hidden="true"></i> Фото</div>
+-                    </div>
+-
+-                    <!-- Emoji panel -->
+-                    <div class="sf-picker-panel" id="sfp-emoji">
+-                        <div id="sf-picker-grid"></div>
+-                    </div>
+-
+-                    <!-- Photo panel -->
+-                    <div class="sf-picker-panel hidden" id="sfp-photo">
+-                        <div class="sf-photo-preview" id="sfp-preview" onclick="document.getElementById('sf-photo-input').click()"></div>
+-                        <div class="sf-photo-hint">Нажмите на круг чтобы выбрать фото<br>Квадратное или прямоугольное — обрежется автоматически</div>
+-                        <div class="sf-photo-btns">
+-                            <button class="sf-pbtn" onclick="document.getElementById('sf-photo-input').click()"><i class="fa-solid fa-folder-open" aria-hidden="true"></i> Выбрать файл</button>
+-                            <button class="sf-pbtn" id="sfp-save-btn" style="display:none" onclick="sfUploadPhoto()"><i class="fa-solid fa-floppy-disk" aria-hidden="true"></i> Сохранить</button>
+-                            <button class="sf-pbtn del" id="sfp-del-btn" onclick="sfDeletePhoto()"><i class="fa-solid fa-trash" aria-hidden="true"></i> Удалить фото</button>
+-                        </div>
+-                        <div id="sf-photo-status"></div>
+-                        <input type="file" id="sf-photo-input" accept="image/*" onchange="sfPhotoSelected(this)">
+-                    </div>
+-
+-                    <div style="padding:0 16px 16px">
+-                        <button id="sf-picker-close" onclick="sfClosePicker()">Закрыть</button>
+-                    </div>
+-                </div>
+-            </div>
+-
+-            <script>
+-            // ── АВАТАРКА: отображение при загрузке ────────────────
+-            // [PERF] Фото приходит из /api/session/init (см. initSession).
+-            // Здесь показываем эмодзи из localStorage до завершения initSession.
+-            (function(){
+-                var SK = 'sf_user_avatar_v2';
+-                var el = document.getElementById('sf-avatar');
+-                if (!el) return;
+-                var savedEmoji = localStorage.getItem(SK);
+-                el.textContent = savedEmoji || '🌲';
+-                // Отдельный /api/avatar/me больше не нужен — фото придёт через initSession
+-            })();
+-
+-            // ── ПИКЕР ─────────────────────────────────────────────
+-            var SF_ICONS = [
+-                '🌲','🌳','🌴','🌵','🌾','🌿','🍀','🍁','🍂','🍃',
+-                '🌱','🌻','🌸','🌺','🌼','🌷','🌹','🪷','💐','🪴',
+-                '🎋','🎍','🪵','🌰','🍄','🫚','🌳','🌲','🌴','🌵'
+-            ];
+-            var _sfEmoji = localStorage.getItem('sf_user_avatar_v2') || SF_ICONS[0];
+-            var _sfPendingFile = null;
+-
+-            function sfTab(tab) {
+-                document.querySelectorAll('.sf-ptab').forEach(function(t,i){
+-                    t.classList.toggle('active', (i===0&&tab==='emoji')||(i===1&&tab==='photo'));
+-                });
+-                document.getElementById('sfp-emoji').classList.toggle('hidden', tab!=='emoji');
+-                document.getElementById('sfp-photo').classList.toggle('hidden', tab!=='photo');
+-                if (tab==='photo') _sfInitPhotoPanel();
+-            }
+-
+-            function sfOpenPicker() {
+-                var grid = document.getElementById('sf-picker-grid');
+-                grid.innerHTML = '';
+-                SF_ICONS.forEach(function(ic){
+-                    var d = document.createElement('div');
+-                    d.className = 'sf-pick-item' + (ic===_sfEmoji?' active':'');
+-                    d.textContent = ic;
+-                    d.onclick = function(){
+-                        _sfEmoji = ic;
+-                        localStorage.setItem('sf_user_avatar_v2', ic);
+-                        var el = document.getElementById('sf-avatar');
+-                        if (el) { el.innerHTML = ''; el.textContent = ic; }
+-                        grid.querySelectorAll('.sf-pick-item').forEach(function(x){x.classList.remove('active');});
+-                        d.classList.add('active');
+-                        // Удаляем фото с сервера чтобы эмодзи не перекрывалось
+-                        fetch('/api/avatar/delete', {method:'POST'}).catch(function(){});
+-                        setTimeout(sfClosePicker, 180);
+-                    };
+-                    grid.appendChild(d);
+-                });
+-                document.getElementById('sf-picker-overlay').classList.add('open');
+-            }
+-
+-            function sfClosePicker() {
+-                document.getElementById('sf-picker-overlay').classList.remove('open');
+-                _sfPendingFile = null;
+-            }
+-
+-            function _sfInitPhotoPanel() {
+-                var prev    = document.getElementById('sfp-preview');
+-                var status  = document.getElementById('sf-photo-status');
+-                var saveBtn = document.getElementById('sfp-save-btn');
+-                var delBtn  = document.getElementById('sfp-del-btn');
+-                if (status)  status.textContent = '';
+-                if (saveBtn) saveBtn.style.display = 'none';
+-                _sfPendingFile = null;
+-                fetch('/api/avatar/me')
+-                    .then(function(r){ return r.json(); })
+-                    .then(function(d){
+-                        if (d.ok && d.photo_url) {
+-                            prev.innerHTML = '<img src="'+d.photo_url+'?t='+Date.now()+'" alt="Текущее фото профиля">';
+-                            if (delBtn) delBtn.style.display = '';
+-                        } else {
+-                            prev.innerHTML = ''; prev.textContent = _sfEmoji;
+-                            if (delBtn) delBtn.style.display = 'none';
+-                        }
+-                    }).catch(function(){ prev.innerHTML = ''; prev.textContent = _sfEmoji; });
+-            }
+-
+-            function sfPhotoSelected(input) {
+-                var file = input.files && input.files[0];
+-                if (!file) return;
+-                _sfPendingFile = file;
+-                var reader = new FileReader();
+-                reader.onload = function(e){
+-                    document.getElementById('sfp-preview').innerHTML = '<img src="'+e.target.result+'" alt="Выбранное фото для загрузки">';
+-                    document.getElementById('sfp-save-btn').style.display = '';
+-                };
+-                reader.readAsDataURL(file);
+-            }
+-
+-            function sfUploadPhoto() {
+-                if (!_sfPendingFile) return;
+-                var status = document.getElementById('sf-photo-status');
+-                status.textContent = '⏳ Сжимаю...';
+-
+-                // Сжимаем изображение до 256×256 через canvas ДО отправки.
+-                // Это решает ошибку 413 (Request Entity Too Large) — на сервер
+-                // уходит лёгкий JPEG ~15–30 КБ вместо оригинального файла.
+-                var img = new Image();
+-                var objectUrl = URL.createObjectURL(_sfPendingFile);
+-                img.onload = function() {
+-                    URL.revokeObjectURL(objectUrl);
+-                    var SIZE = 256;
+-                    var canvas = document.createElement('canvas');
+-                    canvas.width  = SIZE;
+-                    canvas.height = SIZE;
+-                    var ctx = canvas.getContext('2d');
+-
+-                    // Центрируем и обрезаем по меньшей стороне (crop to square)
+-                    var sw = img.width, sh = img.height;
+-                    var side = Math.min(sw, sh);
+-                    var sx = Math.floor((sw - side) / 2);
+-                    var sy = Math.floor((sh - side) / 2);
+-                    ctx.drawImage(img, sx, sy, side, side, 0, 0, SIZE, SIZE);
+-
+-                    var base64 = canvas.toDataURL('image/jpeg', 0.85);
+-                    status.textContent = '⏳ Загружаю...';
+-
+-                    fetch('/api/avatar/upload', {
+-                        method: 'POST',
+-                        headers: {'Content-Type': 'application/json'},
+-                        body: JSON.stringify({photo_data: base64})
+-                    })
+-                    .then(function(r){ return r.json(); })
+-                    .then(function(d){
+-                        if (d.ok) {
+-                            status.textContent = '✅ Сохранено!';
+-                            localStorage.removeItem('sf_user_avatar_v2');
+-                            var el = document.getElementById('sf-avatar');
+-                            if (el) el.innerHTML = '<img src="'+d.photo_url+'?t='+Date.now()+'" alt="Фото пользователя" '
+-                                +'style="width:100%;height:100%;object-fit:cover;border-radius:50%;">';
+-                            _sfPendingFile = null;
+-                            document.getElementById('sfp-save-btn').style.display = 'none';
+-                            document.getElementById('sfp-del-btn').style.display  = '';
+-                            setTimeout(sfClosePicker, 900);
+-                        } else { status.textContent = '❌ ' + (d.error||'Ошибка'); }
+-                    }).catch(function(){ status.textContent = '❌ Ошибка сети'; });
+-                };
+-                img.onerror = function() {
+-                    URL.revokeObjectURL(objectUrl);
+-                    status.textContent = '❌ Не удалось прочитать файл';
+-                };
+-                img.src = objectUrl;
+-            }
+-
+-            function sfDeletePhoto() {
+-                fetch('/api/avatar/delete', {method:'POST'}).then(function(){
+-                    var el = document.getElementById('sf-avatar');
+-                    if (el) { el.innerHTML = ''; el.textContent = _sfEmoji; }
+-                    _sfInitPhotoPanel();
+-                    document.getElementById('sf-photo-status').textContent = 'Фото удалено';
+-                });
+-            }
+-
+-            window.sfOpenPicker    = sfOpenPicker;
+-            window.sfClosePicker   = sfClosePicker;
+-            window.sfTab           = sfTab;
+-            window.sfPhotoSelected = sfPhotoSelected;
+-            window.sfUploadPhoto   = sfUploadPhoto;
+-            window.sfDeletePhoto   = sfDeletePhoto;
+-            </script>
++            <!-- [v20.9] Аватар — один на все страницы: фото, рамка и эмодзи статуса из «Сообщений»
++                 (static/avatar-sync.js). Старый эмодзи-пикер (🌲, sf_user_avatar_v2) удалён: при выборе эмодзи он
++                 удалял фото профиля. sfOpenPicker() теперь открывает «Мой профиль → Рамка» в «Сообщениях». -->
++            {{ inline_js('avatar-sync.js') }}
+ 
+             <script>
+             // ── ВХОДЯЩИЕ ──────────────────────────────────────────
+@@ -1048,15 +861,8 @@
+                 const me = data.me;
+                 if (!me) return;
+ 
+-                // Применяем фото аватара если есть (больше не нужен отдельный /api/avatar/me)
+-                if (me.photo_url) {
+-                    const el = document.getElementById('sf-avatar');
+-                    if (el) {
+-                        el.innerHTML = '<img src="' + me.photo_url + '" alt="Фото пользователя" '
+-                            + 'style="width:100%;height:100%;object-fit:cover;border-radius:50%;" '
+-                            + 'onerror="this.parentNode.textContent=localStorage.getItem(\'sf_user_avatar_v2\')||\'🌲\'">';
+-                    }
+-                }
++                // [v20.9] Фото, рамку и эмодзи статуса рисует static/avatar-sync.js — как в «Сообщениях»
++                if (window.GeoAvatar && me.has_profile) window.GeoAvatar.refresh();
+ 
+                 if (me.has_profile) {
+                     const guestBlock = document.getElementById('sf-guest-block');
+
+--- a/templates/messages.html
++++ b/templates/messages.html
+@@ -1319,6 +1319,8 @@
+ <link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body>
+ <div class="app">
+@@ -1345,6 +1347,10 @@
+                 <div class="tpm-item tpm-settings" onclick="openProfileModal(); closeProfileMenu()">
+                     <i class="fa-solid fa-user-gear"></i>
+                     <span>Настройки профиля</span>
++                </div>
++                <div class="tpm-item" onclick="closeProfileMenu(); window.GeoTheme &amp;&amp; GeoTheme.open()" title="Цвета, шрифт и кнопки (Alt+Shift+T)">
++                    <i class="fa-solid fa-palette"></i>
++                    <span>Оформление</span>
+                 </div>
+                 <div class="tpm-divider"></div>
+                 <div class="tpm-item" onclick="openTaxatorQueue(); closeProfileMenu()">
+@@ -1671,6 +1677,8 @@
+ <script src="{{ url_for('static', filename='calendar.js') }}?v={{ version }}"></script>
+ <script src="{{ url_for('static', filename='vacancy.js') }}?v={{ version }}"></script>
+ <script src="{{ url_for('static', filename='profile-v18.js') }}?v={{ version }}"></script>
++<!-- [v20.9] свой аватар отсюда «тянется» на все страницы и во все вкладки -->
++<script src="{{ url_for('static', filename='avatar-sync.js') }}?v={{ version }}"></script>
+ <script src="{{ url_for('static', filename='net-status.js') }}?v={{ version }}"></script>
+ 
+ <!-- ── CALENDAR MODAL (содержимое строит static/calendar.js) ── -->
+@@ -4333,7 +4341,7 @@
+ document.addEventListener('DOMContentLoaded', function () {
+     const params = new URLSearchParams(window.location.search);
+     const actions = [
+-        ['openProfile', function(){ openProfileModal(); }],
++        ['openProfile', function(){ var t = params.get('tab'); openProfileModal(t === 'frame' || t === 'status' || t === 'privacy' ? t : undefined); }],
+         ['openTaxatorQueue', function(){ openTaxatorQueue(); }],
+         ['openVacancy', function(){ openVacancyForm(); }],
+         ['openCalendar', function(){ openCalendar(); }]
+@@ -4343,6 +4351,7 @@
+     try {
+         action[1]();
+         actions.forEach(function(item){ params.delete(item[0]); });
++        params.delete('tab');
+         const clean = window.location.pathname + (params.toString() ? '?' + params.toString() : '') + window.location.hash;
+         window.history.replaceState({}, '', clean);
+     } catch (e) { console.warn('Не удалось открыть раздел из меню профиля', e); }
+
+--- a/templates/manuals.html
++++ b/templates/manuals.html
+@@ -185,6 +185,8 @@
+ <script src="/static/guide-hub.js?v=independent-v15"></script>
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body class="mv18">
+ <div class="top">
+
+--- a/templates/login.html
++++ b/templates/login.html
+@@ -153,6 +153,8 @@
+ <link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body class="f-body" data-mood="forest">
+ 
+
+--- a/templates/admin_users.html
++++ b/templates/admin_users.html
+@@ -64,6 +64,8 @@
+ <link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body>
+ <div class="header">
+
+--- a/templates/diag.html
++++ b/templates/diag.html
+@@ -178,6 +178,8 @@
+ <link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body class="f-body" data-mood="forest">
+ <div class="fs-scene" aria-hidden="true"></div>
+
+--- a/templates/maintenance.html
++++ b/templates/maintenance.html
+@@ -161,6 +161,8 @@
+ <link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body class="f-body" data-mood="forest">
+ 
+
+--- a/templates/frozen.html
++++ b/templates/frozen.html
+@@ -153,6 +153,8 @@
+ <link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body class="f-body" data-mood="frost">
+ 
+
+--- a/templates/blacklisted.html
++++ b/templates/blacklisted.html
+@@ -153,6 +153,8 @@
+ <link rel="stylesheet" href="/static/design-system-v16.css?v=v16-layout">
+ <script defer src="/static/future-icons.js?v=independent-v15"></script>
+ <script defer src="/static/brand-logo.js?v=independent-v15"></script>
++<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
++<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+ </head>
+ <body class="f-body" data-mood="danger">
+ 
+
+--- /dev/null
++++ b/static/avatar-sync.js
+@@ -0,0 +1,198 @@
++/* avatar-sync.js — Геосервис v20.9: ОДИН аватар пользователя на всех страницах.
++   Источник — профиль из «Сообщений» (/api/profile/me: фото, рамка, эмодзи статуса; буква и цвет — как в messages.js).
++   • Главная: элементы [data-me-avatar] (строка профиля в боковой панели) рисуются сразу из кэша
++     (localStorage geo_av_me_v1), затем обновляются с сервера.
++   • «Сообщения»: profile-v18.js сообщает об изменении своего аватара (GeoAvatar.fromMessages) —
++     все открытые вкладки перерисовываются мгновенно (BroadcastChannel + событие storage).
++   Старый «эмодзи-пикер» главной (sf_user_avatar_v2) больше не используется: он показывал 🌲 вместо фото
++   и при выборе эмодзи удалял фото профиля. */
++(function () {
++  'use strict';
++  var VER = '20.9', KEY = 'geo_av_me_v1', CH = 'geo-avatar-v1';
++  var D = document, W = window;
++  if (W.GeoAvatar && W.GeoAvatar.version) return;
++
++  /* Палитра и буква — точная копия messages.js (AVATAR_PALETTE / ODZIML_PALETTE / avatarInner) */
++  var PALETTE = [
++    ['#e74c7a', '#f0547c', '#fff'], ['#f07d23', '#f5a623', '#fff'], ['#d4a017', '#f0c040', '#1a1000'],
++    ['#1fa84a', '#3dcc6e', '#fff'], ['#17a8a8', '#2dd4d4', '#fff'], ['#1a6fe8', '#4da0f5', '#fff'],
++    ['#7b3ff5', '#a86bf9', '#fff'], ['#c0392b', '#e05a4e', '#fff'], ['#2d8c5e', '#4ab890', '#fff'],
++    ['#5a5a8a', '#8080b8', '#fff']
++  ];
++  var ODZ = ['#7c3aed', '#c026d3', '#fff'];
++  var FRAMES = ['pine', 'birch', 'oak', 'fern', 'moss', 'autumn', 'frost', 'sunrise', 'mushroom', 'night', 'spruce'];
++
++  function isOdz(org) {
++    if (typeof W.isOdziml === 'function') { try { return !!W.isOdziml(org); } catch (e) {} }
++    return ['odziml', 'одзимл'].indexOf(String(org || '').normalize('NFKC').toLowerCase().replace(/\s+/g, '')) !== -1;
++  }
++  function palette(ip, org) {
++    if (isOdz(org)) return ODZ;
++    var h = 0, s = ip || 'x';
++    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffff;
++    return PALETTE[h % PALETTE.length];
++  }
++  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
++  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
++  function letterOf(ip, name) {
++    var e = lsGet('geo_avatar_emoji_' + ip);                    // старый эмодзи-аватар из «Сообщений»
++    if (e) return e;
++    var n = String(name || '').trim();
++    return n ? n.charAt(0).toUpperCase() : '?';
++  }
++  function sameState(a, b) {
++    if (!a || !b) return false;
++    return a.ip === b.ip && a.name === b.name && a.org === b.org && a.photo === b.photo && a.frame === b.frame && a.emoji === b.emoji;
++  }
++  function norm(o) {
++    o = o || {};
++    var fr = FRAMES.indexOf(o.frame) >= 0 ? o.frame : 'none';
++    return { ip: String(o.ip || ''), name: String(o.name || ''), org: String(o.org || ''), photo: String(o.photo || ''),
++             frame: fr, emoji: String(o.emoji || ''), t: +o.t || Date.now() };
++  }
++  function readCache() { try { var o = JSON.parse(lsGet(KEY) || 'null'); return o && typeof o === 'object' ? norm(o) : null; } catch (e) { return null; } }
++
++  var broken = {};
++  var state = null;        // текущий «мой» аватар
++  var targets = [];
++
++  /* ── отрисовка одного элемента ── */
++  function paint(el, st) {
++    if (!el || !st) return;
++    var p = palette(st.ip, st.org);
++    var photo = st.photo && !broken[st.photo] ? st.photo : '';
++    var letter = letterOf(st.ip, st.name);
++    var sig = [st.ip, letter, p[0], photo, st.frame, st.emoji].join('|');
++    if (el.getAttribute('data-gav-sig') === sig) return;
++    el.setAttribute('data-gav-sig', sig);
++    el.classList.add('gav');
++    el.style.setProperty('background', p[0], 'important');
++    el.style.setProperty('color', p[2], 'important');
++    el.className = el.className.replace(/\bgav-(framed|fr-[a-z]+|photo)\b/g, '').replace(/\s{2,}/g, ' ').trim();
++    if (st.frame !== 'none') el.classList.add('gav-framed', 'gav-fr-' + st.frame);
++    if (photo) el.classList.add('gav-photo');
++    var h = '<span class="gav-l" aria-hidden="true"></span>';
++    el.innerHTML = h;
++    el.firstChild.textContent = letter;
++    if (photo) {
++      var im = D.createElement('img');
++      im.className = 'gav-img'; im.alt = ''; im.decoding = 'async'; im.draggable = false;
++      im.addEventListener('error', function () { broken[photo] = 1; el.removeAttribute('data-gav-sig'); paint(el, state || st); });
++      im.src = photo;
++      el.appendChild(im);
++    }
++    if (st.emoji) {
++      var em = D.createElement('span');
++      em.className = 'gav-emo'; em.setAttribute('aria-hidden', 'true'); em.textContent = st.emoji;
++      el.appendChild(em);
++    }
++    el.setAttribute('data-gav-ver', VER);
++  }
++  function scan() {
++    targets = Array.prototype.slice.call(D.querySelectorAll('[data-me-avatar]'));
++    return targets;
++  }
++  function paintAll() { if (!state) return; scan().forEach(function (el) { paint(el, state); }); }
++
++  /* ── источник «по умолчанию»: атрибуты разметки ── */
++  function fromMarkup() {
++    var el = D.querySelector('[data-me-avatar][data-me-ip]');
++    var ip = (el && el.getAttribute('data-me-ip')) || String(W.MY_IP || '');
++    if (!ip) return null;
++    return norm({ ip: ip, name: (el && el.getAttribute('data-me-name')) || W.MY_NAME || '',
++                  org: (el && el.getAttribute('data-me-org')) || W.MY_ORG || '' , t: 1 });
++  }
++
++  var bc = null;
++  try { if ('BroadcastChannel' in W) bc = new BroadcastChannel(CH); } catch (e) { bc = null; }
++
++  function apply(st, opts) {
++    st = norm(st); opts = opts || {};
++    var mine = fromMarkup();
++    if (mine && st.ip && mine.ip !== st.ip) return false;     // чужой IP (другой пользователь на этом ПК)
++    if (mine && !st.name) st.name = mine.name;
++    if (mine && !st.org) st.org = mine.org;
++    var changed = !sameState(state, st);
++    state = st;
++    paintAll();
++    if (changed && opts.save !== false) lsSet(KEY, JSON.stringify(st));
++    if (changed && opts.broadcast !== false && bc) { try { bc.postMessage({ type: 'avatar', state: st }); } catch (e) {} }
++    if (changed) { try { W.dispatchEvent(new CustomEvent('geo:avatar', { detail: st })); } catch (e) {} }
++    return changed;
++  }
++
++  /* ── загрузка с сервера (то же, что видит окно «Мой профиль» в «Сообщениях») ── */
++  var loading = null;
++  function refresh() {
++    if (loading) return loading;
++    var mine = fromMarkup();
++    if (!mine) return Promise.resolve(null);
++    loading = fetch('/api/profile/me', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
++      .then(function (r) { return r.ok ? r.json() : null; })
++      .then(function (j) {
++        loading = null;
++        if (!j || !j.ok) return null;
++        var pr = j.profile || {};
++        apply({ ip: j.ip || mine.ip, name: j.name || mine.name, org: j.org || mine.org,
++                photo: j.photo_src || j.photo_url || '', frame: pr.frame, emoji: pr.status_emoji, t: Date.now() });
++        return state;
++      }, function () { loading = null; return null; });
++    return loading;
++  }
++
++  /* ── вызывается из profile-v18.js на странице «Сообщения» ── */
++  function fromMessages(c) {
++    if (!c) return;
++    var ip = String(W.MY_IP || ''); if (!ip) return;
++    apply({ ip: ip, name: W.MY_NAME || '', org: W.MY_ORG || '', photo: c.photo || c.photo_src || '',
++            frame: c.frame, emoji: c.emoji !== undefined ? c.emoji : c.status_emoji, t: Date.now() });
++  }
++
++  if (bc) bc.onmessage = function (e) { var m = e && e.data; if (m && m.type === 'avatar' && m.state) apply(m.state, { save: false, broadcast: false }); };
++  W.addEventListener('storage', function (e) {
++    if (e.key === KEY && e.newValue) { try { apply(JSON.parse(e.newValue), { save: false, broadcast: false }); } catch (x) {} }
++    else if (e.key && e.key.indexOf('geo_avatar_emoji_') === 0) { if (state) { scan().forEach(function (el) { el.removeAttribute('data-gav-sig'); }); paintAll(); } }
++  });
++
++  /* Совместимость: старый пикер главной теперь открывает «Мой профиль → Рамка» в «Сообщениях» */
++  function openSettings(tab) { location.href = '/messages?openProfile=1' + (tab ? '&tab=' + encodeURIComponent(tab) : ''); }
++  if (!W.PV) {
++    W.sfOpenPicker = function () { openSettings('frame'); };
++    W.sfClosePicker = function () {};
++    W.sfTab = W.sfPhotoSelected = W.sfUploadPhoto = W.sfDeletePhoto = function () {};
++  }
++  try { localStorage.removeItem('sf_user_avatar_v2'); } catch (e) {}
++
++  function start() {
++    var mine = fromMarkup();
++    var cached = readCache();
++    if (mine) {
++      if (cached && cached.ip === mine.ip) {
++        if (!cached.name) cached.name = mine.name;
++        if (!cached.org) cached.org = mine.org;
++        apply(cached, { save: false, broadcast: false });
++      } else apply(mine, { save: false, broadcast: false });
++    }
++    // Клик по самому аватару (не по строке профиля) — сразу к настройкам профиля
++    D.addEventListener('dblclick', function (e) {
++      var t = e.target && e.target.closest && e.target.closest('[data-me-avatar]');
++      if (t && !W.PV) { e.preventDefault(); openSettings('frame'); }
++    });
++    if (mine && !W.PV) {
++      var go = function () { refresh(); };
++      if (D.readyState === 'complete') setTimeout(go, 400); else W.addEventListener('load', function () { setTimeout(go, 600); });
++      // вкладка снова видна — подтянуть изменения, сделанные на другом устройстве
++      D.addEventListener('visibilitychange', function () {
++        if (D.visibilityState === 'visible' && state && Date.now() - (state.t || 0) > 60000) refresh();
++      });
++    }
++  }
++
++  W.GeoAvatar = { version: VER, get: function () { return state; }, refresh: refresh, paint: function (el) { if (state) paint(el, state); },
++                  repaint: function () { scan().forEach(function (el) { el.removeAttribute('data-gav-sig'); }); paintAll(); },
++                  fromMessages: fromMessages, apply: apply, open: openSettings };
++  if (D.readyState === 'loading') {
++    // скрипт встроен сразу после строки профиля: рисуем немедленно, без «ёлочки» до загрузки страницы
++    if (D.querySelector('[data-me-avatar]')) start(); else D.addEventListener('DOMContentLoaded', start);
++  } else start();
++})();
+
+--- /dev/null
++++ b/static/avatar-sync.css
+@@ -0,0 +1,31 @@
++/* avatar-sync.css — Геосервис v20.9: аватар пользователя вне «Сообщений» выглядит так же, как в них:
++   круг цвета профиля с буквой, фото поверх, «лесная» рамка (/static/frames/*.svg) и эмодзи статуса. */
++html[lang] .gav, html[lang] body .sidebar .sf-profile-trigger .sf-avatar.gav{
++  position:relative!important;border-radius:50%!important;border:0!important;overflow:visible!important;isolation:isolate;
++  display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 auto;
++  font:700 calc(var(--gav-size,34px) * .42)/1 var(--gs-font,Inter,system-ui,sans-serif)!important;letter-spacing:0!important;
++  width:var(--gav-size,34px)!important;height:var(--gav-size,34px)!important;min-width:var(--gav-size,34px)!important;
++  box-shadow:none!important;user-select:none;cursor:inherit;
++  transition:transform .15s ease!important;
++}
++html[lang] .gav:hover{transform:none}
++html[lang] .gav>.gav-l{position:relative;z-index:0;pointer-events:none}
++html[lang] .gav>.gav-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;z-index:0;pointer-events:none}
++html[lang] .gav.gav-photo>.gav-l{visibility:hidden}
++html[lang] .gav.gav-framed::after{content:"";position:absolute;inset:-12.5%;z-index:1;pointer-events:none;background:center/100% 100% no-repeat}
++html[lang] .gav-fr-pine::after{background-image:url("/static/frames/pine.svg?v=18.1")}
++html[lang] .gav-fr-birch::after{background-image:url("/static/frames/birch.svg?v=18.1")}
++html[lang] .gav-fr-oak::after{background-image:url("/static/frames/oak.svg?v=18.1")}
++html[lang] .gav-fr-fern::after{background-image:url("/static/frames/fern.svg?v=18.1")}
++html[lang] .gav-fr-moss::after{background-image:url("/static/frames/moss.svg?v=18.1")}
++html[lang] .gav-fr-autumn::after{background-image:url("/static/frames/autumn.svg?v=18.1")}
++html[lang] .gav-fr-frost::after{background-image:url("/static/frames/frost.svg?v=18.1")}
++html[lang] .gav-fr-sunrise::after{background-image:url("/static/frames/sunrise.svg?v=18.1")}
++html[lang] .gav-fr-mushroom::after{background-image:url("/static/frames/mushroom.svg?v=18.1")}
++html[lang] .gav-fr-night::after{background-image:url("/static/frames/night.svg?v=18.1")}
++html[lang] .gav-fr-spruce::after{background-image:url("/static/frames/spruce.svg?v=18.1")}
++html[lang] .gav>.gav-emo{position:absolute;right:-10%;bottom:-10%;z-index:2;width:46%;height:46%;display:grid;place-items:center;border-radius:50%;
++  line-height:1;font-size:calc(var(--gav-size,34px) * .3);background:var(--gav-emo-bg,#fff);box-shadow:0 0 0 2px var(--gav-emo-ring,rgba(0,0,0,.18));pointer-events:none}
++html[lang] body .sidebar .sf-profile-trigger .sf-avatar.gav{--gav-emo-bg:var(--gs-card,#13281f);--gav-emo-ring:var(--gs-bg,#0b1914)}
++html[lang] body .sidebar .sf-profile-trigger .sf-avatar.gav.gav-framed{margin:3px}
++html[lang] body .sidebar .sf-profile-trigger:hover .sf-avatar.gav{filter:brightness(1.06)}
+
+--- /dev/null
++++ b/check_install_v20.9.py
+@@ -0,0 +1,217 @@
++# -*- coding: utf-8 -*-
++"""Проверка установки Геосервиса v20.9 (и всех файлов v20.3–v20.9).
++
++Запуск в папке приложения (рядом с app.py):
++    python check_install_v20.9.py                          — файлы на диске
++    python check_install_v20.9.py --url http://127.0.0.1:8000   — ещё и работающий сервер (caps, маршруты, статика)
++    python check_install_v20.9.py --url https://portal --cookie "session=…"   — если API требует входа
++Ничего не меняет, только читает."""
++import argparse, importlib.util, json, os, re, sys, urllib.request, urllib.error
++
++VER = '20.9'
++SERVER_VER = '20.7'      # .py-модули в v20.8–v20.9 не менялись — сервер по-прежнему сообщает 20.7
++THEMES = ['bor', 'graphite', 'white', 'navy', 'gis', 'contrast', 'field', 'swiss', 'taiga', 'gov']
++# шаблоны, где в <head> подключается ранний запуск темы (v20.9)
++BOOT_TEMPLATES = ['index.html', 'messages.html', 'manuals.html', 'login.html', 'admin_users.html', 'diag.html',
++                  'maintenance.html', 'frozen.html', 'blacklisted.html']
++# файл → (версия, метка в тексте или None, что даёт)
++FILES = [
++    ('static/themes/gt-boot.js',      '20.9', 'GT_BOOT',                  'тема ставится до первой отрисовки (без мигания)'),
++    ('static/themes/gt.js',           '20.9', 'window.GeoTheme',          'окно «Оформление» (Alt+Shift+T) и «Страж контраста»'),
++    ('static/themes/gt-core.css',     '20.9', '.gt-ov',                   'окно «Оформление» и общие правила тем'),
++    ('static/themes/gt-fonts.css',    '20.9', '@font-face',               'шрифты тем (свои файлы, интернет не нужен)'),
++    ('static/themes/fonts/OFL.txt',   '20.9', 'OPEN FONT LICENSE',        'лицензия шрифтов (SIL OFL 1.1)'),
++] + [('static/themes/gt-%s.css' % t,  '20.9', 'html[data-gt="%s"]' % t,   'тема «%s»' % t) for t in THEMES] + [
++    ('static/avatar-sync.js',         '20.9', "VER = '20.9'",             'один аватар на всех страницах (фото, рамка, эмодзи)'),
++    ('static/avatar-sync.css',        '20.9', '.gav',                     'вид аватара и рамок на главной'),
++    ('static/profile-v18.js',         '20.9', 'avPublish',                'профиль в «Сообщениях» сообщает об изменении аватара'),
++    ('templates/index.html',          '20.9', 'data-gt-open',             'пункт «Оформление» в меню профиля'),
++    ('templates/index.html',          '20.9', 'avatar-sync.js',           'аватар из профиля «Сообщений»'),
++    ('templates/messages.html',       '20.9', 'GeoTheme.open',            '«Сообщения»: пункт «Оформление»'),
++    ('templates/messages.html',       '20.9', 'avatar-sync.js',           '«Сообщения»: синхронизация аватара'),
++    ('static/dzz-extent.js',          '20.8', "version: '20.8'",          'настоящий охват снимков ДЗЗ из GeoServer («Приблизить к слою», поиск)'),
++    ('static/panel-timeline.js',      '20.8', "var VER = '20.8'",         '«Съёмка по годам» v20.8 (шкала не перекрывает кнопки и линейку)'),
++    ('static/map-core.js',            '20.8', 'DzzExtent.zoomToSearchItem', 'поиск снимков и лесхозов без ошибочного приближения'),
++    ('templates/index.html',          '20.8', 'dzz-extent.js',            'подключение dzz-extent.js'),
++    ('georef_api.py',                 '20.7', 'SERVER_VERSION = "20.7"', 'API «План/Растр/MBTiles», сдвиги, /api/crs-shift/raster/…'),
++    ('georef_shift.py',               '20.7', "'mb2tif'",                 '«Переместить» для «MBTiles → TIFF»'),
++    ('georef_runner.py',              '20.3', None,                       'запуск заданий georef'),
++    ('jobkit.py',                     '20.3', None,                       'очередь заданий'),
++    ('tools/georef/mbtiles_shift.py', '20.7', 'def shift_tiles',            'сдвиг MBTiles целиком (новый файл)'),
++    ('tools/georef/mbtiles2tif.py',   '20.7', '--shift',                  'MBTiles → GeoTIFF со сдвигом'),
++    ('tools/georef/tif2mbtiles.py',   '20.3', None,                       'Растр → MBTiles'),
++    ('static/panel-georef.js',        '20.7', "CLIENT_VER = '20.7'",      'кнопки «Переместить» во вкладках MBTiles'),
++    ('static/panel-crs.js',           '20.7', '/api/crs-shift/raster/',   '«Смена СК»: сохранение сдвига растров'),
++    ('static/header-scene.js',        '20.6', 'OffscreenCanvas',          'шапка без рывков'),
++    ('templates/index.html',          '20.6', 'bgl-emblem-css',           'значок «Белгослес» (v20.6)'),
++    ('preview_page.py',               '20.5', None,                       'страница предпросмотра'),
++    ('static/preview/preview.js',     '20.5', None,                       'предпросмотр'),
++]
++OK, BAD, WARN = '  ✓ ', '  ✗ ', '  ! '
++bad = []
++
++
++def out(s=''):
++    try:
++        print(s)
++    except UnicodeEncodeError:
++        print(s.encode(sys.stdout.encoding or 'ascii', 'replace').decode(sys.stdout.encoding or 'ascii'))
++
++
++def read(p):
++    try:
++        with open(p, encoding='utf-8', errors='replace') as f:
++            return f.read()
++    except OSError:
++        return None
++
++
++def main():
++    ap = argparse.ArgumentParser(description='Проверка установки Геосервиса v' + VER)
++    ap.add_argument('--root', default=os.path.dirname(os.path.abspath(__file__)), help='папка приложения (где app.py)')
++    ap.add_argument('--url', help='адрес работающего приложения, например http://127.0.0.1:8000')
++    ap.add_argument('--cookie', default='', help='Cookie для запросов (если API требует входа)')
++    a = ap.parse_args()
++    root = os.path.abspath(a.root)
++    out(f'Геосервис v{VER}: проверка установки\nПапка: {root}\n')
++    if not os.path.isfile(os.path.join(root, 'app.py')):
++        out(BAD + 'рядом нет app.py — запустите скрипт из папки приложения или укажите --root')
++        bad.append('app.py')
++    nested = os.path.join(root, 'geoservice')
++    if os.path.isdir(nested) and any(os.path.exists(os.path.join(nested, n)) for n in ('georef_api.py', 'static', 'tools')):
++        out(WARN + 'есть вложенная папка geoservice\\ с файлами пакета — её содержимое нужно было скопировать В КОРЕНЬ '
++                   'приложения (рядом с app.py), а не папкой. Перенесите файлы на уровень выше и удалите вложенную папку.')
++        bad.append('вложенная geoservice')
++    out('Файлы:')
++    for rel, ver, mark, what in FILES:
++        p = os.path.join(root, *rel.split('/'))
++        t = read(p)
++        if t is None:
++            out(f'{BAD}{rel:32} нет файла (нужен с v{ver}: {what})'); bad.append(rel)
++        elif mark and mark not in t:
++            out(f'{BAD}{rel:32} старая версия — нет признака v{ver} ({what})'); bad.append(rel)
++        else:
++            out(f'{OK}{rel:32} v{ver}+ · {what}')
++    # v20.9: ранний запуск темы во всех страницах и все шрифты из gt-fonts.css на месте
++    miss = [n for n in BOOT_TEMPLATES if 'themes/gt-boot.js' not in (read(os.path.join(root, 'templates', n)) or '')]
++    if miss:
++        out(f'{BAD}шаблоны без gt-boot.js: {", ".join(miss)} — замените файлы templates из пакета'); bad.append('templates (gt-boot)')
++    else:
++        out(f'{OK}gt-boot.js подключён во всех {len(BOOT_TEMPLATES)} шаблонах')
++    css = read(os.path.join(root, 'static', 'themes', 'gt-fonts.css')) or ''
++    urls = re.findall(r'url\("([^"?#]+)', css)
++    lost = []
++    for u in urls:
++        p = os.path.join(root, *u.lstrip('/').split('/')) if u.startswith('/') else os.path.join(root, 'static', 'themes', *u.split('/'))
++        if not os.path.isfile(p):
++            lost.append(u)
++    if urls and not lost:
++        out(f'{OK}шрифты тем: все {len(urls)} файлов на месте (static/themes/fonts, static/fonts)')
++    elif urls:
++        out(f'{BAD}нет файлов шрифтов: {len(lost)} из {len(urls)} (например {lost[0]}) — скопируйте static/themes/fonts целиком'); bad.append('fonts')
++    out('\nПакеты Python (для tools/georef, в том Python, которым запущен этот скрипт):')
++    for mod, pip in (('numpy', 'numpy'), ('rasterio', 'rasterio'), ('PIL', 'pillow'), ('pyproj', 'pyproj')):
++        found = importlib.util.find_spec(mod) is not None
++        out((OK if found else WARN) + mod + ('' if found else f' — не найден (pip install {pip}); если приложение работает в другом venv — проверьте там'))
++    if a.url:
++        check_server(a.url.rstrip('/'), a.cookie)
++    out('\nИтог: ' + ('всё на месте ✓' if not bad else 'нужно исправить: ' + ', '.join(bad)))
++    if not a.url:
++        out('Проверка сервера: python check_install_v20.9.py --url http://127.0.0.1:<порт>  (или откройте в браузере <адрес>/static/themes/gt-boot.js — в первой строке «v20.9»)')
++    return 1 if bad else 0
++
++
++def get(url, cookie, method='GET'):
++    rq = urllib.request.Request(url, method=method, headers={'Cookie': cookie} if cookie else {})
++    try:
++        with urllib.request.urlopen(rq, timeout=20) as r:
++            return r.status, r.read()
++    except urllib.error.HTTPError as e:
++        return e.code, e.read()
++    except Exception as e:                      # нет соединения
++        return 0, str(e).encode()
++
++
++def check_server(base, cookie):
++    out(f'\nСервер {base}:')
++    st, b = get(base + '/api/georef/caps', cookie)
++    if st != 200:
++        out(f'{BAD}/api/georef/caps → HTTP {st} {b[:120].decode("utf-8", "replace")}'
++            + (' — нужен вход: передайте --cookie или откройте адрес в браузере' if st in (401, 403, 302) else ''))
++        bad.append('caps'); return
++    try:
++        c = json.loads(b)
++    except ValueError:
++        out(BAD + '/api/georef/caps — не JSON (вход в систему?)'); bad.append('caps'); return
++    v = c.get('version')
++    if v in (SERVER_VER, VER):
++        out(f'{OK}caps.version = {v}')
++    else:
++        out(f'{BAD}caps.version = {v or "нет (модули старее v20.7)"} — скопируйте .py-файлы и tools/georef из пакета и ПЕРЕЗАПУСТИТЕ приложение (нужны модули v{SERVER_VER})')
++        bad.append('caps.version')
++    kinds = c.get('shift_kinds') or []
++    out((OK if 'mb2tif' in kinds else BAD) + 'сдвиг для вкладок: ' + (', '.join(kinds) or 'нет'))
++    if 'mb2tif' not in kinds:
++        bad.append('shift_kinds')
++    tools = c.get('shift_tools') or {}
++    if tools:
++        miss = [k for k, x in tools.items() if not x]
++        out((OK if not miss else BAD) + 'инструменты сдвига: ' + ', '.join(f'{k} {"✓" if x else "✗"}' for k, x in tools.items()))
++        if miss:
++            bad.append('shift_tools')
++    for p in c.get('problems') or []:
++        out(WARN + 'сервер сообщает: ' + str(p))
++    st, b = get(base + '/api/crs-shift/raster/check-install/items/all', cookie)
++    if st == 200 and b'"raster"' in b:
++        out(OK + '/api/crs-shift/raster/… — маршруты сохранения растров «Смены СК» подключены')
++    else:
++        out(f'{BAD}/api/crs-shift/raster/… → HTTP {st} — georef_api.py v20.7 не загружен (перезапустите приложение)')
++        bad.append('crs-shift/raster')
++    st, b = get(base + '/static/panel-georef.js', cookie)
++    if st == 200:
++        m = re.search(rb"CLIENT_VER = '([\d.]+)'", b)
++        cv = m.group(1).decode() if m else '?'
++        out((OK if cv == SERVER_VER else BAD) + f'сервер отдаёт panel-georef.js v{cv}' + ('' if cv == SERVER_VER else ' — замените static/panel-georef.js'))
++        if cv != SERVER_VER:
++            bad.append('panel-georef.js (сервер)')
++    else:
++        out(f'{WARN}/static/panel-georef.js → HTTP {st}')
++    # v20.9 — оформление и аватар (то, что реально получает браузер)
++    for rel, mark, what in (('/static/themes/gt-boot.js', b'GT_BOOT', 'ранний запуск темы'),
++                            ('/static/themes/gt.js', b'window.GeoTheme', 'окно «Оформление», страж контраста'),
++                            ('/static/themes/gt-core.css', b'.gt-ov', 'стили окна'),
++                            ('/static/themes/gt-bor.css', b'html[data-gt="bor"]', 'тема «Бор»'),
++                            ('/static/avatar-sync.js', b"VER = '20.9'", 'аватар')):
++        st, b = get(base + rel, cookie)
++        if st == 200 and mark in b:
++            out(f'{OK}сервер отдаёт {rel} v20.9 · {what}')
++        elif st == 200:
++            out(f'{BAD}сервер отдаёт старый {rel} — файл не заменён или кэш nginx; Ctrl+F5 в браузере'); bad.append(rel + ' (сервер)')
++        else:
++            out(f'{BAD}{rel} → HTTP {st} — нет папки static/themes или файла'); bad.append(rel + ' (сервер)')
++    st, b = get(base + '/static/themes/fonts/golos-text-cyrillic-400.woff2', cookie)
++    out((OK if st == 200 and len(b) > 1000 else BAD) + f'шрифт темы /static/themes/fonts/golos-text-cyrillic-400.woff2 → HTTP {st}, {len(b)} байт')
++    if not (st == 200 and len(b) > 1000):
++        bad.append('fonts (сервер)')
++    st, b = get(base + '/login', cookie)
++    if st == 200 and b'themes/gt-boot.js' in b:
++        out(OK + 'страница входа подключает gt-boot.js (шаблоны v20.9 загружены)')
++    elif st == 200:
++        out(f'{BAD}страница входа без gt-boot.js — шаблоны не заменены (или приложение кэширует шаблоны: перезапустите)'); bad.append('templates (сервер)')
++    else:
++        out(f'{WARN}/login → HTTP {st}')
++    # v20.8 — статика ДЗЗ и «Съёмки по годам» (то, что реально получает браузер)
++    for rel, mark, what in (('/static/dzz-extent.js', b"version: '20.8'", 'охват снимков ДЗЗ'),
++                            ('/static/panel-timeline.js', b"var VER = '20.8'", '«Съёмка по годам»'),
++                            ('/static/map-core.js', b'DzzExtent.zoomToSearchItem', 'карта (поиск снимков)')):
++        st, b = get(base + rel, cookie)
++        if st == 200 and mark in b:
++            out(f'{OK}сервер отдаёт {rel} v20.8 · {what}')
++        elif st == 200:
++            out(f'{BAD}сервер отдаёт старый {rel} — файл не заменён или кэш nginx; Ctrl+F5 в браузере'); bad.append(rel + ' (сервер)')
++        else:
++            out(f'{BAD}{rel} → HTTP {st}'); bad.append(rel + ' (сервер)')
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+
+--- /dev/null
++++ b/static/themes/gt-boot.js
+@@ -0,0 +1,25 @@
++/* Геосервис ОДЗиМЛ v20.9 — модули оформления: ранний запуск (стоит в конце <head> всех страниц).
++   Читает выбор из localStorage('gt_theme') или из адреса ?gt=<тема>|classic, ставит <html data-gt="…">
++   и подключает стили темы ДО первой отрисовки (без мигания). Затем асинхронно грузит gt.js —
++   окно «Оформление» (Alt+Shift+T) и «Страж контраста». Без выбранной темы вид прежний. */
++(function () {
++  var IDS = ["bor", "graphite", "white", "navy", "gis", "contrast", "field", "swiss", "taiga", "gov"], KEY = 'gt_theme', d = document, h = d.documentElement, id = '';
++  try { id = localStorage.getItem(KEY) || ''; } catch (e) {}
++  try {
++    var m = /[?&]gt=([a-z]+)/.exec(location.search);
++    if (m) { id = m[1]; try { localStorage.setItem(KEY, IDS.indexOf(id) >= 0 ? id : 'classic'); } catch (e) {} }
++  } catch (e) {}
++  if (IDS.indexOf(id) < 0) id = '';
++  var me = d.currentScript, src = (me && me.src) || '/static/themes/gt-boot.js';
++  var base = src.replace(/[?#].*$/, '').replace(/[^\/]*$/, ''), v = (/[?&]v=([^&#]+)/.exec(src) || [])[1], q = v ? '?v=' + v : '';
++  window.GT_BOOT = { ids: IDS, base: base, q: q, theme: id };
++  var html = '<link rel="stylesheet" id="gt-core-css" href="' + base + 'gt-core.css' + q + '">';
++  if (id) {
++    h.setAttribute('data-gt', id);
++    html += '<link rel="stylesheet" id="gt-fonts-css" href="' + base + 'gt-fonts.css' + q + '">' +
++            '<link rel="stylesheet" id="gt-theme-css" href="' + base + 'gt-' + id + '.css' + q + '">';
++  }
++  d.write(html);
++  var s = d.createElement('script'); s.src = base + 'gt.js' + q; s.async = true;
++  (d.head || h).appendChild(s);
++})();
+
+--- /dev/null
++++ b/static/themes/gt-bor.css
+@@ -0,0 +1,3 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Бор» (bor): тёмная лесная.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="bor"]{--gt-font:"Golos Text","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;--gt-scheme:dark;--gt-bg:#0e1c14;--gt-card:#142a1d;--gt-soft:#1b3626;--gt-tint:#23432f;--gt-ink:#edf6ef;--gt-muted:#aac3b3;--gt-line:#3b5c47;--gt-accent:#a6e05a;--gt-fill:#a6e05a;--gt-fill-h:#bdf07a;--gt-on:#0b1a0f;--gt-on-acc:#0b1a0f;--gt-danger:#ff9b8f;--gt-warn:#ffd27a;--gt-warn-bg:#3a2f14;--gt-ok:#7fdc8c;--gt-err-bg:#7a1f1a;--gt-err-ink:#ffffff;--gt-hover:#22412e;--gt-hover-ink:#ffffff;--gt-press:#2a4f38;--gt-sel:#2b4f24;--gt-sel-ink:#f2ffe6;--gt-s-bg:#0b1710;--gt-s-bg2:#13261a;--gt-s-soft:#172e20;--gt-s-ink:#eaf4ec;--gt-s-muted:#a5beac;--gt-s-line:#2f4a39;--gt-s-acc:#a6e05a;--gt-s-fill:#a6e05a;--gt-s-fill-h:#bdf07a;--gt-s-on:#0b1a0f;--gt-s-hover:#1f3b29;--gt-s-hover-ink:#ffffff;--gt-s-sel:#24442c;--gt-s-danger:#ff9b8f;--gt-head-bg:#0b1710;--gt-head-ink:#f3fbef;--gt-head-muted:#cfe3d2;--gt-head-plate:rgba(5,14,9,.55);--gt-scene:block;--gt-scene-filter:none;--gt-scene-op:1;--gt-o-bg:#0e1c14;--gt-o-bg2:#16291e;--gt-o-ink:#ecf5ee;--gt-o-muted:#a8c1b0;--gt-o-line:#33513f;--gt-o-acc:#a6e05a;--gt-o-hover:#22412e;--gt-o-sel:#2b4f24;--gt-c-bg:#122419;--gt-c-ink:#e4efe6;--gt-c-line:#33513f;--gt-c-hover:#23432f;--gt-c-hover-ink:#ffffff;--gt-c-on-bg:#a6e05a;--gt-c-on-ink:#0b1a0f;--gt-c-plate:transparent;--gt-r:10px;--gt-r-sm:8px;--gt-r-lg:14px;--gt-r-btn:9px;--gt-ctl:32px;--gt-mib:40px;--gt-mib-icon:20px;--gt-nav:34px;--gt-stroke:1.75;--gt-bw:1px;--gt-fs:14px;--gt-focus:#ffe27a;--gt-focus-w:2px;--gt-tt:none;--gt-ls:0;--gt-shadow:0 1px 2px rgb(0 0 0/.3),0 6px 18px rgb(0 0 0/.28);--gt-shadow-lg:0 4px 10px rgb(0 0 0/.3),0 18px 40px rgb(0 0 0/.35);--gt-s-sel-ink:#f2ffe6;--gt-o-hover-ink:#ffffff;--gt-o-sel-ink:#f2ffe6}
+
+--- /dev/null
++++ b/static/themes/gt-contrast.css
+@@ -0,0 +1,10 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Высокий контраст» (contrast): чёрно-жёлтая, крупная.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="contrast"]{--gt-font:"Fira Sans","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;--gt-scheme:dark;--gt-bg:#000000;--gt-card:#0a0a0a;--gt-soft:#141414;--gt-tint:#1f1f1f;--gt-ink:#ffffff;--gt-muted:#e0e0e0;--gt-line:#ffffff;--gt-accent:#ffe600;--gt-fill:#ffe600;--gt-fill-h:#fff176;--gt-on:#000000;--gt-on-acc:#000000;--gt-danger:#ff8a80;--gt-warn:#ffe600;--gt-warn-bg:#000000;--gt-ok:#7dff8a;--gt-err-bg:#ff8a80;--gt-err-ink:#000000;--gt-hover:#ffe600;--gt-hover-ink:#000000;--gt-press:#fff176;--gt-sel:#ffe600;--gt-sel-ink:#000000;--gt-s-bg:#000000;--gt-s-bg2:#0a0a0a;--gt-s-soft:#141414;--gt-s-ink:#ffffff;--gt-s-muted:#e0e0e0;--gt-s-line:#ffffff;--gt-s-acc:#ffe600;--gt-s-fill:#ffe600;--gt-s-fill-h:#fff176;--gt-s-on:#000000;--gt-s-hover:#ffe600;--gt-s-hover-ink:#000000;--gt-s-sel:#ffe600;--gt-s-danger:#ff8a80;--gt-head-bg:#000000;--gt-head-ink:#ffffff;--gt-head-muted:#e0e0e0;--gt-head-plate:#000000;--gt-scene:none;--gt-scene-filter:none;--gt-scene-op:0;--gt-o-bg:#000000;--gt-o-bg2:#0a0a0a;--gt-o-ink:#ffffff;--gt-o-muted:#e0e0e0;--gt-o-line:#ffffff;--gt-o-acc:#ffe600;--gt-o-hover:#ffe600;--gt-o-sel:#ffe600;--gt-c-bg:#000000;--gt-c-ink:#ffffff;--gt-c-line:#ffffff;--gt-c-hover:#ffe600;--gt-c-hover-ink:#000000;--gt-c-on-bg:#ffe600;--gt-c-on-ink:#000000;--gt-c-plate:transparent;--gt-r:6px;--gt-r-sm:4px;--gt-r-lg:8px;--gt-r-btn:6px;--gt-ctl:40px;--gt-mib:48px;--gt-mib-icon:24px;--gt-nav:42px;--gt-stroke:2.25;--gt-bw:2px;--gt-fs:15.5px;--gt-focus:#00e5ff;--gt-focus-w:3px;--gt-tt:none;--gt-ls:.01em;--gt-shadow:none;--gt-shadow-lg:0 0 0 2px #ffffff;--gt-s-sel-ink:#000000;--gt-o-hover-ink:#000000;--gt-o-sel-ink:#000000}
++html[data-gt][data-gt][lang][data-gt="contrast"],html[data-gt][data-gt][lang][data-gt="contrast"] body{--mib-btn-size:48px!important;--mib-icon-size:24px!important;--map-nav-size:42px!important;--map-nav-icon-size:22px!important}
++html[data-gt][data-gt][lang][data-gt="contrast"] body:not(.fullscreen-mode) #map-icon-bar{width:calc(48px + 14px)!important}
++html[data-gt][data-gt][lang][data-gt="contrast"]{--gt-lmix:100%;--gt-lmix2:100%}
++html[data-gt][data-gt][lang][data-gt="contrast"] body a:not([class]){text-decoration:underline!important}
++html[data-gt][data-gt][lang][data-gt="contrast"] body #map-icon-bar>button.mib-btn{box-shadow:inset 0 0 0 2px transparent!important}
++html[data-gt][data-gt][lang][data-gt="contrast"] body #map-icon-bar>button.mib-btn:hover{box-shadow:inset 0 0 0 2px #ffffff!important}
++html[data-gt][data-gt][lang][data-gt="contrast"] body :is(#sf-profile-menu .sf-profile-menu-item,.tpm-item,.lsr-item,.dialog-item):is(:hover,:focus-visible){outline:2px solid #ffffff!important;outline-offset:-2px!important}
+
+--- /dev/null
++++ b/static/themes/gt-core.css
+@@ -0,0 +1,326 @@
++/* ==========================================================================
++   Геосервис ОДЗиМЛ v20.9 — модули оформления «gt» (ядро).
++   Работает только когда выбрана тема: <html data-gt="bor|graphite|…"> (ставит gt-boot.js).
++   Цвета/размеры — токены --gt-* из static/themes/gt-<тема>.css; здесь — «мост» к токенам
++   прежних версий (--gs-* v15, --v17-*, «Сообщения», «Методички», страницы входа) и
++   точечные правила для мест, где цвета были зашиты в код.
++   Без data-gt файл влияет только на окно «Оформление» (.gt-*). Удалите папку static/themes
++   и строку gt-boot.js в шаблонах — вернётся прежний вид.
++   ========================================================================== */
++
++/* ---------- 0. Окно «Оформление» (работает и без темы) ---------- */
++.gt-ov{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:18px;
++ background:rgb(6 10 8/.55);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);animation:gt-fade .16s ease-out}
++.gt-ov[hidden]{display:none!important}
++@keyframes gt-fade{from{opacity:0}}
++.gt-dlg{position:relative;width:min(1180px,100%);max-height:min(860px,calc(100dvh - 36px));display:flex;flex-direction:column;overflow:hidden;
++ background:var(--gt-card,#13281f);color:var(--gt-ink,#edf7ef);border:var(--gt-bw,1px) solid var(--gt-line,#577568);border-radius:var(--gt-r-lg,16px);
++ box-shadow:0 10px 30px rgb(0 0 0/.35),0 30px 80px rgb(0 0 0/.35);font:400 14px/1.45 var(--gt-font,"Inter","Segoe UI",system-ui,sans-serif);text-align:left}
++.gt-dlg *,.gt-dlg *::before,.gt-dlg *::after{box-sizing:border-box}
++.gt-hd{display:flex;align-items:flex-start;gap:14px;padding:18px 20px 12px;border-bottom:1px solid color-mix(in srgb,var(--gt-line,#577568) 60%,transparent)}
++.gt-hd h2{margin:0;font-size:19px;line-height:1.25;font-weight:700;letter-spacing:0;text-transform:none;color:inherit;font-family:inherit}
++.gt-hd p{margin:4px 0 0;color:var(--gt-muted,#b4c9be);font-size:13px;max-width:760px}
++.gt-x{margin-left:auto;flex:0 0 auto;width:36px;height:36px;display:grid;place-items:center;border-radius:var(--gt-r-sm,8px);cursor:pointer;
++ background:transparent;color:var(--gt-ink,#edf7ef);border:1px solid color-mix(in srgb,var(--gt-line,#577568) 70%,transparent);font:inherit;font-size:20px;line-height:1}
++.gt-x:hover{background:var(--gt-hover,#22412e);color:var(--gt-hover-ink,#fff)}
++.gt-grid{flex:1;overflow:auto;padding:16px 20px 8px;display:grid;grid-template-columns:repeat(auto-fill,minmax(204px,1fr));gap:14px;align-content:start}
++.gt-card{all:unset;box-sizing:border-box;display:flex;flex-direction:column;gap:9px;padding:10px 10px 12px;cursor:pointer;border-radius:var(--gt-r,12px);
++ background:var(--gt-soft,#1b362b);color:var(--gt-ink,#edf7ef);border:2px solid transparent;outline:0;position:relative;transition:border-color .12s,transform .12s}
++.gt-card:hover{border-color:color-mix(in srgb,var(--gt-accent,#b7ed83) 60%,transparent);transform:translateY(-1px)}
++.gt-card:focus-visible{outline:var(--gt-focus-w,2px) solid var(--gt-focus,#ffe27a);outline-offset:2px}
++.gt-card[aria-pressed="true"]{border-color:var(--gt-accent,#b7ed83)}
++.gt-card[aria-pressed="true"]::after{content:"✓ Выбрано";position:absolute;top:16px;right:16px;padding:2px 8px;border-radius:999px;font:700 11px/1.6 var(--gt-font,system-ui);
++ background:var(--gt-fill,#b7ed83);color:var(--gt-on,#132419)}
++.gt-nm{display:flex;flex-direction:column;gap:1px;padding:0 2px}
++.gt-nm b{font-size:15px;font-weight:700;line-height:1.25}
++.gt-nm small{font-size:12px;color:var(--gt-muted,#b4c9be);line-height:1.35}
++.gt-nm em{font-style:normal;font-size:11.5px;color:var(--gt-muted,#b4c9be);opacity:.95}
++/* мини-превью: шапка + боковая панель + карта + панель + кнопки */
++.gt-pv{position:relative;display:block;height:104px;border-radius:calc(var(--gt-r,12px) - 4px);overflow:hidden;border:1px solid rgb(0 0 0/.25);
++ background:linear-gradient(135deg,#9fb58a 0 18%,#b9c99c 18% 31%,#8ea77c 31% 47%,#c8d4ad 47% 60%,#97b083 60% 78%,#aebf92 78%);isolation:isolate}
++.gt-pv::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(115deg,transparent 0 22px,rgb(80 110 70/.25) 22px 23px),
++ repeating-linear-gradient(25deg,transparent 0 30px,rgb(255 255 255/.18) 30px 31px)}
++.gt-pv-s{position:absolute;left:0;top:0;bottom:0;width:34%;background:var(--p-sbg);border-right:1px solid var(--p-sline);display:flex;flex-direction:column;gap:6px;padding:0 0 8px}
++.gt-pv-h{height:26px;background:var(--p-head);display:flex;align-items:center;padding:0 7px;gap:5px}
++.gt-pv-h i{display:block;width:12px;height:12px;border-radius:3px;background:var(--p-hink);opacity:.85}
++.gt-pv-h u{display:block;height:5px;width:40%;border-radius:3px;background:var(--p-hink)}
++.gt-pv-q{margin:0 7px;height:12px;border-radius:var(--p-r);background:var(--p-sbg2);border:1px solid var(--p-sline)}
++.gt-pv-l{margin:0 9px;height:4px;border-radius:2px;background:var(--p-sink);opacity:.9}
++.gt-pv-l.m{width:55%;background:var(--p-smut)}
++.gt-pv-b{margin:auto 7px 0;height:14px;border-radius:var(--p-rb);background:var(--p-sfill)}
++.gt-pv-p{position:absolute;left:40%;top:12px;width:34%;padding:7px;border-radius:var(--p-r);background:var(--p-obg);border:1px solid var(--p-oline);box-shadow:0 2px 6px rgb(0 0 0/.18);display:flex;flex-direction:column;gap:5px}
++.gt-pv-p i{display:block;height:4px;border-radius:2px;background:var(--p-oink)}
++.gt-pv-p i.m{width:70%;background:var(--p-omut)}
++.gt-pv-p b{display:block;height:11px;width:60%;border-radius:var(--p-rb);background:var(--p-fill)}
++.gt-pv-c{position:absolute;right:7px;top:10px;width:22px;padding:3px;border-radius:var(--p-r);background:var(--p-cbg);border:1px solid var(--p-cline);display:flex;flex-direction:column;gap:3px}
++.gt-pv-c i{display:block;height:13px;border-radius:var(--p-rc);border:1.5px solid var(--p-cink);opacity:.9}
++.gt-pv-c i.on{background:var(--p-con);border-color:var(--p-con)}
++.gt-pv-t{position:absolute;left:40%;bottom:9px;padding:2px 7px;border-radius:var(--p-r);font:600 10px/1.5 var(--p-font);background:var(--p-obg);color:var(--p-oink);border:1px solid var(--p-oline)}
++.gt-ft{display:flex;align-items:center;flex-wrap:wrap;gap:10px 18px;padding:12px 20px 16px;border-top:1px solid color-mix(in srgb,var(--gt-line,#577568) 60%,transparent)}
++.gt-sw{display:flex;align-items:flex-start;gap:10px;cursor:pointer;max-width:720px}
++.gt-sw input{appearance:none;-webkit-appearance:none;flex:0 0 auto;width:38px;height:22px;margin:1px 0 0;border-radius:999px;position:relative;cursor:pointer;
++ background:var(--gt-tint,#294331);border:1px solid var(--gt-line,#577568);transition:background .15s}
++.gt-sw input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--gt-muted,#b4c9be);transition:transform .15s,background .15s}
++.gt-sw input:checked{background:var(--gt-fill,#b7ed83);border-color:var(--gt-fill,#b7ed83)}
++.gt-sw input:checked::after{transform:translateX(16px);background:var(--gt-on,#132419)}
++.gt-sw input:focus-visible{outline:var(--gt-focus-w,2px) solid var(--gt-focus,#ffe27a);outline-offset:2px}
++.gt-sw span{display:flex;flex-direction:column;font-size:13.5px;line-height:1.4}
++.gt-sw small{color:var(--gt-muted,#b4c9be);font-size:12px}
++.gt-ok{margin-left:auto;min-height:38px;padding:8px 22px;border-radius:var(--gt-r-btn,10px);cursor:pointer;border:0;font:700 14px/1.2 var(--gt-font,system-ui);
++ background:var(--gt-fill,#b7ed83);color:var(--gt-on,#132419)}
++.gt-ok:hover{background:var(--gt-fill-h,#c9f59c)}
++.gt-ok:focus-visible{outline:var(--gt-focus-w,2px) solid var(--gt-focus,#ffe27a);outline-offset:2px}
++.gt-note{font-size:12px;color:var(--gt-muted,#b4c9be)}
++@media (max-width:640px){.gt-ov{padding:0}.gt-dlg{max-height:100dvh;height:100dvh;border-radius:0}.gt-grid{grid-template-columns:1fr 1fr;gap:10px;padding:12px}.gt-pv{height:92px}.gt-hd p{display:none}}
++@media (prefers-reduced-motion:reduce){.gt-ov{animation:none}.gt-card{transition:none}}
++html.gt-switching *,html.gt-switching *::before,html.gt-switching *::after{transition:none!important}
++
++/* ---------- 1. Мост токенов (страница) ---------- */
++html[data-gt][data-gt][lang],html[data-gt][data-gt][lang] body{
++ color-scheme:var(--gt-scheme);
++ --gs-bg:var(--gt-bg)!important;--gs-card:var(--gt-card)!important;--gs-soft:var(--gt-soft)!important;--gs-tint:var(--gt-tint)!important;
++ --gs-ink:var(--gt-ink)!important;--gs-muted:var(--gt-muted)!important;--gs-line:var(--gt-line)!important;--gs-accent:var(--gt-accent)!important;
++ --gs-on:var(--gt-on)!important;--gs-danger:var(--gt-danger)!important;--gs-warn:var(--gt-warn)!important;--gs-warn-bg:var(--gt-warn-bg)!important;
++ --gs-header:var(--gt-s-bg)!important;--gs-font:var(--gt-font)!important;
++ --gs-body:calc(var(--gt-fs) * var(--ui-fs,1))!important;--gs-small:calc(var(--gt-fs) * .9 * var(--ui-fs,1))!important;
++ --v17-xs:calc(var(--gt-fs) * .83 * var(--ui-fs,1))!important;--v17-label:calc(var(--gt-fs) * .965 * var(--ui-fs,1))!important;
++ --v17-h:calc(var(--gt-fs) * .93 * var(--ui-fs,1))!important;--v17-title:calc(var(--gt-fs) * 1.07 * var(--ui-fs,1))!important;
++ --v17-line:color-mix(in srgb,var(--gs-line) var(--gt-lmix,55%),transparent)!important;--v17-line-2:color-mix(in srgb,var(--gs-line) var(--gt-lmix2,80%),transparent)!important;
++ --v17-hover:color-mix(in srgb,var(--gs-ink) 9%,transparent)!important;--v17-press:color-mix(in srgb,var(--gs-ink) 15%,transparent)!important;
++ --v17-sel:color-mix(in srgb,var(--gs-accent) 16%,var(--gs-card))!important;--v17-glass:color-mix(in srgb,var(--gs-card) 95%,transparent)!important;
++ --v17-shadow:var(--gt-shadow)!important;--v17-shadow-lg:var(--gt-shadow-lg)!important;
++ --v17-r:var(--gt-r)!important;--v17-r-sm:var(--gt-r-sm)!important;--v17-r-lg:var(--gt-r-lg)!important;--v17-ctl:var(--gt-ctl)!important;
++ --icon-accent:var(--gt-c-ink)!important;--icon-hover-bg:var(--gt-c-hover)!important;--icon-hover-color:var(--gt-c-hover-ink)!important;--icon-bg-active:var(--gt-c-on-bg)!important;
++ /* «Сообщения» */
++ --acc:var(--gt-accent)!important;--acc-l:var(--gt-fill-h)!important;--acc-g:var(--gt-s-acc)!important;
++ --acc-f:color-mix(in srgb,var(--gt-accent) 14%,var(--gt-card))!important;--acc-m:color-mix(in srgb,var(--gt-accent) 55%,var(--gt-card))!important;
++ --sb:var(--gt-s-bg)!important;--sb2:var(--gt-s-bg2)!important;--sb3:var(--gt-s-soft)!important;--t-i:var(--gt-s-ink)!important;--brd-d:var(--gt-s-line)!important;
++ --bg:var(--gt-bg)!important;--bg-c:var(--gt-bg)!important;--sur:var(--gt-card)!important;--sur2:var(--gt-soft)!important;--brd:var(--gt-line)!important;
++ --t1:var(--gt-ink)!important;--t2:var(--gt-muted)!important;--t3:var(--gt-muted)!important;--mo:var(--gt-fill)!important;--mi:var(--gt-card)!important;--red:var(--gt-danger)!important;
++ /* «Методички» */
++ --sb-t:var(--gt-s-ink)!important;--sb-m:var(--gt-s-muted)!important;--card:var(--gt-card)!important;--line:var(--gt-line)!important;
++ --txt:var(--gt-ink)!important;--muted:var(--gt-muted)!important;--danger:var(--gt-danger)!important;
++ /* вход, блокировки, обслуживание, диагностика */
++ --f-bg0:var(--gt-s-bg)!important;--f-bg1:var(--gt-s-bg2)!important;--f-bg2:var(--gt-s-soft)!important;--f-acc:var(--gt-s-acc)!important;--f-acc2:var(--gt-s-fill-h)!important;
++ --f-acc-d:var(--gt-s-fill)!important;--f-text:var(--gt-s-ink)!important;--f-muted:var(--gt-s-muted)!important;--f-dim:var(--gt-s-muted)!important;
++ --f-line:color-mix(in srgb,var(--gt-s-line) 80%,transparent)!important;--f-glass:color-mix(in srgb,var(--gt-s-bg2) 94%,transparent)!important;
++ --f-font:var(--gt-font)!important;--f-radius:var(--gt-r-lg)!important;
++ --mib-icon-size:var(--gt-mib-icon)!important;
++}
++/* Боковая панель и шапки — собственная палитра s_* */
++html[data-gt][data-gt][lang] body :is(.sidebar,.dialogs-panel,.topbar,.topbar-profile-menu){
++ --gs-bg:var(--gt-s-bg)!important;--gs-card:var(--gt-s-bg2)!important;--gs-soft:var(--gt-s-soft)!important;--gs-tint:var(--gt-s-hover)!important;
++ --gs-ink:var(--gt-s-ink)!important;--gs-muted:var(--gt-s-muted)!important;--gs-line:var(--gt-s-line)!important;--gs-accent:var(--gt-s-acc)!important;
++ --gs-on:var(--gt-s-on)!important;--gs-danger:var(--gt-s-danger)!important;
++ --v17-line:color-mix(in srgb,var(--gs-line) var(--gt-lmix,55%),transparent)!important;--v17-line-2:color-mix(in srgb,var(--gs-line) var(--gt-lmix2,80%),transparent)!important;
++ --v17-hover:color-mix(in srgb,var(--gs-ink) 9%,transparent)!important;--v17-press:color-mix(in srgb,var(--gs-ink) 15%,transparent)!important;
++ --v17-sel:var(--gt-s-sel)!important;--v17-glass:color-mix(in srgb,var(--gs-card) 95%,transparent)!important;
++}
++/* Всплывающее меню профиля — палитра страницы */
++html[data-gt][data-gt][lang] body #sf-profile-menu{
++ --gs-bg:var(--gt-bg)!important;--gs-card:var(--gt-card)!important;--gs-soft:var(--gt-soft)!important;--gs-tint:var(--gt-tint)!important;
++ --gs-ink:var(--gt-ink)!important;--gs-muted:var(--gt-muted)!important;--gs-line:var(--gt-line)!important;--gs-accent:var(--gt-accent)!important;
++ --gs-on:var(--gt-on)!important;--gs-danger:var(--gt-danger)!important;
++ --v17-line:color-mix(in srgb,var(--gt-line) var(--gt-lmix,55%),transparent)!important;--v17-hover:var(--gt-hover)!important;--v17-sel:var(--gt-sel)!important;
++}
++
++/* ---------- 2. Типографика ---------- */
++html[data-gt][data-gt][lang] body{font-family:var(--gt-font)!important;background-color:var(--gt-bg);color:var(--gt-ink)}
++html[data-gt][data-gt][lang] body :is(*):not(i):not([class*="fa-"]):not(svg):not(svg *):not(code):not(pre):not(kbd):not(samp):not(.gt-mono):not([data-gt-keepfont]){font-family:var(--gt-font)!important}
++html[data-gt][data-gt][lang] body :is(code,pre,kbd,samp,.gt-mono,.coord-val,.coords-val,#mouse-position,.ol-mouse-position,#coords-panel input,.csb-labels,.csb-ratio,.crs-out,.crs-val){font-family:var(--gt-mono)!important;font-variant-numeric:tabular-nums}
++html[data-gt][data-gt][lang] body :is(.sf-profile-menu-heading,.dialogs-header-title,.coord-label,.popup-label,.compose-label,.sf-news-head,.ytl-title,.msp-title,.msp-section,.cfg-label){text-transform:var(--gt-tt)!important;letter-spacing:var(--gt-ls)!important}
++html[data-gt][data-gt][lang] body svg.tb-svg{stroke-width:var(--gt-stroke)!important}
++html[data-gt][data-gt][lang] ::selection{background:color-mix(in srgb,var(--gt-accent) 38%,transparent);color:inherit}
++html[data-gt][data-gt][lang] body :where(button,a,input,select,textarea,summary,[tabindex]):focus-visible{outline:var(--gt-focus-w) solid var(--gt-focus)!important;outline-offset:2px!important}
++html[data-gt][data-gt][lang] body #map-icon-bar>button.mib-btn:focus-visible,html[data-gt][data-gt][lang] body #map-nav-group .map-nav-btn:focus-visible,html[data-gt][data-gt][lang] body :is(#map-geoloc-btn,#map-view3d-btn,#map-fullscreen-btn):focus-visible{outline:var(--gt-focus-w) solid var(--gt-focus)!important;outline-offset:2px!important}
++
++/* ---------- 3. Боковая панель ---------- */
++html[data-gt][data-gt][lang] body .sidebar{background:var(--gt-s-bg)!important;color:var(--gt-s-ink)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-header,html[data-gt][data-gt][lang] body .sidebar .forest-header{background:var(--gt-head-bg)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .sidebar .forest-header :is(.fh-bg,.fh-grid){display:var(--gt-scene)!important}
++html[data-gt][data-gt][lang] body .sidebar #fh-scene-canvas{display:var(--gt-scene)!important;filter:var(--gt-scene-filter)!important;opacity:var(--gt-scene-op)!important}
++html[data-gt][data-gt][lang] body .sidebar .fh-texts{background:var(--gt-head-plate)!important;border-color:transparent!important;box-shadow:none!important}
++html[data-gt][data-gt][lang] body .sidebar .fh-title{color:var(--gt-head-ink)!important;text-shadow:none!important}
++html[data-gt][data-gt][lang] body .sidebar .fh-subtitle{color:var(--gt-head-muted)!important;text-shadow:none!important}
++html[data-gt][data-gt][lang] body .sidebar #sidebar-search-wrap{background:transparent!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .sidebar #sidebar-search-inner{background:var(--gt-s-bg2)!important;border:var(--gt-bw) solid var(--gt-s-line)!important;border-radius:var(--gt-r)!important;color:var(--gt-s-ink)!important;box-shadow:none!important}
++html[data-gt][data-gt][lang] body .sidebar #sidebar-search-inner:focus-within{border-color:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .sidebar #sidebar-search-inner input{color:var(--gt-s-ink)!important;background:transparent!important}
++html[data-gt][data-gt][lang] body .sidebar #sidebar-search-inner input::placeholder{color:var(--gt-s-muted)!important;opacity:1}
++html[data-gt][data-gt][lang] body .sidebar #sidebar-search-inner :is(#sbs-icon,button){color:var(--gt-s-muted)!important;background:transparent!important}
++html[data-gt][data-gt][lang] body .sidebar #sidebar-search-inner button:hover{color:var(--gt-s-hover-ink)!important;background:var(--gt-s-hover)!important}
++html[data-gt][data-gt][lang] body .sidebar :is(#lsp-results-container,#lsp-filter-panel,#search-filter-panel){background:var(--gt-s-bg2)!important;color:var(--gt-s-ink)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .sidebar .lsr-item{color:var(--gt-s-ink)!important;background:transparent!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .sidebar .lsr-item:is(:hover,.active,.selected,[aria-selected="true"]){background:var(--gt-s-hover)!important;color:var(--gt-s-hover-ink)!important}
++html[data-gt][data-gt][lang] body .sidebar .lsr-item :is(small,.lsr-sub,.lsr-meta,.lsr-type){color:inherit!important;opacity:.85}
++html[data-gt][data-gt][lang] body .sidebar #tree-container{color:var(--gt-s-ink)!important;background:transparent!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-footer{background:var(--gt-s-bg)!important;border-color:var(--gt-s-line)!important;color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .sidebar :is(.sf-news-panel,.sf-news-card){background:var(--gt-s-bg2)!important;border-color:var(--gt-s-line)!important;color:var(--gt-s-ink)!important;border-radius:var(--gt-r)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-news-head{color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-news-head i{color:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-news-title{color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-news-date{color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-news-dots span{background:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-news-dots span.active{background:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-marquee-wrap{background:var(--gt-s-soft)!important;border-color:var(--gt-s-line)!important;border-radius:var(--gt-r-sm)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-marquee-wrap::before{background:linear-gradient(90deg,var(--gt-s-soft),transparent)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-marquee-wrap::after{background:linear-gradient(270deg,var(--gt-s-soft),transparent)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-marquee-item{color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-marquee-item i{color:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-user-row{background:var(--gt-s-bg2)!important;border:var(--gt-bw) solid var(--gt-s-line)!important;border-radius:var(--gt-r)!important;color:var(--gt-s-ink)!important;box-shadow:none!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-user-row:hover,html[data-gt][data-gt][lang] body .sidebar .sf-user-row[aria-expanded="true"]{background:var(--gt-s-hover)!important;color:var(--gt-s-hover-ink)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-user-row .sf-username{color:inherit!important;text-shadow:none!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-user-row .sf-department{color:inherit!important;opacity:.82}
++html[data-gt][data-gt][lang] body .sidebar .sf-user-row .sf-profile-chevron{color:inherit!important;opacity:.8}
++html[data-gt][data-gt][lang] body .sidebar :is(.sf-guest-row,.sf-guest-text){color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .sidebar .sf-guest-icon{color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-footer .btn-forest{background:var(--gt-s-fill)!important;color:var(--gt-s-on)!important;border:var(--gt-bw) solid var(--gt-s-fill)!important;border-radius:var(--gt-r-btn)!important;box-shadow:none!important;text-shadow:none!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-footer .btn-forest:hover{background:var(--gt-s-fill-h)!important;border-color:var(--gt-s-fill-h)!important;color:var(--gt-s-on)!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-footer .btn-forest :is(i,svg){color:inherit!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-footer .btn-forest.btn-earth-red,html[data-gt][data-gt][lang] body .sidebar .sidebar-footer a.btn-forest[href="/login"]{background:var(--gt-s-bg2)!important;border-color:var(--gt-s-line)!important;color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-footer .btn-forest.btn-earth-red{color:var(--gt-s-danger)!important;border-color:color-mix(in srgb,var(--gt-s-danger) 60%,transparent)!important}
++html[data-gt][data-gt][lang] body .sidebar .sidebar-footer .btn-forest.btn-earth-red:hover,html[data-gt][data-gt][lang] body .sidebar .sidebar-footer a.btn-forest[href="/login"]:hover{background:var(--gt-s-hover)!important;color:var(--gt-s-hover-ink)!important}
++html[data-gt][data-gt][lang] body #v17-sidebar-toggle{background:var(--gt-s-bg)!important;color:var(--gt-s-ink)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body #v17-sidebar-toggle:hover{background:var(--gt-s-hover)!important;color:var(--gt-s-hover-ink)!important}
++
++/* меню профиля */
++html[data-gt][data-gt][lang] body #sf-profile-menu{background:var(--gt-card)!important;color:var(--gt-ink)!important;border:var(--gt-bw) solid var(--gt-line)!important;border-radius:var(--gt-r-lg)!important;box-shadow:var(--gt-shadow-lg)!important}
++html[data-gt][data-gt][lang] body #sf-profile-menu .sf-profile-menu-heading{color:var(--gt-muted)!important}
++html[data-gt][data-gt][lang] body #sf-profile-menu .sf-profile-menu-divider{background:var(--gt-line)!important;opacity:.7}
++html[data-gt][data-gt][lang] body #sf-profile-menu .sf-profile-menu-item{color:var(--gt-ink)!important;background:transparent!important;border-radius:var(--gt-r-sm)!important}
++html[data-gt][data-gt][lang] body #sf-profile-menu .sf-profile-menu-item :is(svg,i){color:var(--gt-accent)!important}
++html[data-gt][data-gt][lang] body #sf-profile-menu .sf-profile-menu-item:is(:hover,:focus-visible,[aria-current="page"]){background:var(--gt-hover)!important;color:var(--gt-hover-ink)!important}
++html[data-gt][data-gt][lang] body #sf-profile-menu .sf-profile-menu-item:is(:hover,:focus-visible) :is(svg,i){color:inherit!important}
++html[data-gt][data-gt][lang] body #sf-profile-menu .sf-profile-menu-item:active{background:var(--gt-press)!important}
++html[data-gt][data-gt][lang] body #sf-profile-menu :is(#sf-inbox-badge,.sf-menu-badge){background:var(--gt-danger)!important;color:var(--gt-bg)!important}
++
++/* ---------- 4. Кнопки и плашки на карте ---------- */
++html[data-gt][data-gt][lang] body #map-icon-bar{background:var(--gt-c-bg)!important;border:var(--gt-bw) solid var(--gt-c-line)!important;border-radius:var(--gt-r-lg)!important;box-shadow:var(--gt-shadow)!important}
++html[data-gt][data-gt][lang] body #map-icon-bar::before,html[data-gt][data-gt][lang] body #map-icon-bar::after{background:var(--gt-c-line)!important;filter:none!important;opacity:.8}
++html[data-gt][data-gt][lang] body #map-icon-bar>button.mib-btn{color:var(--gt-c-ink)!important;background:var(--gt-c-plate)!important;border-radius:var(--gt-r-btn)!important}
++html[data-gt][data-gt][lang] body #map-icon-bar>button.mib-btn:hover{background:var(--gt-c-hover)!important;color:var(--gt-c-hover-ink)!important}
++html[data-gt][data-gt][lang] body #map-icon-bar>button.mib-btn:is(.active-panel,.active,[aria-pressed="true"]){background:var(--gt-c-on-bg)!important;color:var(--gt-c-on-ink)!important}
++html[data-gt][data-gt][lang] body .mib-btn .mib-tip{background:var(--gt-ink)!important;color:var(--gt-bg)!important;border:0!important;border-radius:var(--gt-r-sm)!important;box-shadow:var(--gt-shadow)!important}
++html[data-gt][data-gt][lang] body #map-nav-group{background:var(--gt-c-bg)!important;border:var(--gt-bw) solid var(--gt-c-line)!important;border-radius:var(--gt-r)!important;box-shadow:var(--gt-shadow)!important}
++html[data-gt][data-gt][lang] body #map-nav-group .map-nav-btn{color:var(--gt-c-ink)!important;background:transparent!important;border-color:var(--gt-c-line)!important;border-radius:var(--gt-r-sm)!important}
++html[data-gt][data-gt][lang] body #map-nav-group .map-nav-btn:hover{background:var(--gt-c-hover)!important;color:var(--gt-c-hover-ink)!important}
++html[data-gt][data-gt][lang] body :is(#map-geoloc-btn,#map-view3d-btn,#map-fullscreen-btn){background:var(--gt-c-bg)!important;color:var(--gt-c-ink)!important;border:var(--gt-bw) solid var(--gt-c-line)!important;border-radius:var(--gt-r)!important;box-shadow:var(--gt-shadow)!important}
++html[data-gt][data-gt][lang] body :is(#map-geoloc-btn,#map-view3d-btn,#map-fullscreen-btn):hover{background:var(--gt-c-hover)!important;color:var(--gt-c-hover-ink)!important}
++html[data-gt][data-gt][lang] body :is(#map-geoloc-btn,#map-view3d-btn,#map-fullscreen-btn):is(.active,.on,[aria-pressed="true"]){background:var(--gt-c-on-bg)!important;color:var(--gt-c-on-ink)!important}
++
++/* выдвижная панель разделов, измерения, правая панель */
++html[data-gt][data-gt][lang] body :is(#map-slide-panel,#msr-side-panel,#info-float-popup){background:var(--gt-o-bg)!important;color:var(--gt-o-ink)!important;border-color:var(--gt-o-line)!important;border-radius:var(--gt-r-lg)!important;box-shadow:var(--gt-shadow-lg)!important;
++ --gs-bg:var(--gt-o-bg)!important;--gs-card:var(--gt-o-bg)!important;--gs-soft:var(--gt-o-bg2)!important;--gs-ink:var(--gt-o-ink)!important;--gs-muted:var(--gt-o-muted)!important;--gs-line:var(--gt-o-line)!important;--gs-accent:var(--gt-o-acc)!important}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(h1,h2,h3,h4,.msp-title,.panel-title){color:var(--gt-o-ink)!important}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]),select,textarea){background:var(--gt-o-bg2)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r-sm)!important}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(input,textarea)::placeholder{color:var(--gt-o-muted)!important;opacity:1}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(.tool-btn,.msp-btn,.crs-btn,.crs-swap,.prnt-seg-btn,.prnt-reset-btn,.hs-sat-btn,.prnt-btn-cancel){background:var(--gt-o-bg2)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r-btn)!important;box-shadow:none!important}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(.tool-btn,.msp-btn,.crs-btn,.crs-swap,.prnt-seg-btn,.prnt-reset-btn,.hs-sat-btn,.prnt-btn-cancel):hover{background:var(--gt-o-hover)!important;color:var(--gt-o-hover-ink)!important}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(.tool-btn,.msp-btn,.crs-btn,.prnt-seg-btn,.hs-sat-btn):is(.active,.on,.sel,.selected,[aria-pressed="true"],[aria-selected="true"]){background:var(--gt-o-sel)!important;color:var(--gt-o-sel-ink)!important;border-color:var(--gt-o-acc)!important}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(.prnt-btn-go,#hs-report-pdf,#hs-report-xlsx,.btn-primary,.msp-primary){background:var(--gt-fill)!important;color:var(--gt-on)!important;border:var(--gt-bw) solid var(--gt-fill)!important;border-radius:var(--gt-r-btn)!important}
++html[data-gt][data-gt][lang] body #map-slide-panel :is(.prnt-btn-go,#hs-report-pdf,#hs-report-xlsx,.btn-primary,.msp-primary):hover{background:var(--gt-fill-h)!important;color:var(--gt-on)!important}
++html[data-gt][data-gt][lang] body #coords-panel{background:var(--gt-o-bg)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r-lg)!important;box-shadow:var(--gt-shadow)!important}
++html[data-gt][data-gt][lang] body #coords-panel #coords-header{background:transparent!important;color:var(--gt-o-ink)!important;border-color:var(--gt-o-line)!important}
++html[data-gt][data-gt][lang] body #coords-panel .close-coords{color:var(--gt-o-muted)!important}
++html[data-gt][data-gt][lang] body #coords-panel .close-coords:hover{color:var(--gt-o-ink)!important}
++html[data-gt][data-gt][lang] body #coords-panel .coord-label{color:var(--gt-o-muted)!important}
++html[data-gt][data-gt][lang] body #coords-panel .coord-val{color:var(--gt-o-ink)!important}
++html[data-gt][data-gt][lang] body #coords-panel input{background:var(--gt-o-bg2)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r-sm)!important}
++html[data-gt][data-gt][lang] body #coords-panel input::placeholder{color:var(--gt-o-muted)!important;opacity:1}
++html[data-gt][data-gt][lang] body #coords-panel button{background:var(--gt-fill)!important;color:var(--gt-on)!important;border:var(--gt-bw) solid var(--gt-fill)!important;border-radius:var(--gt-r-btn)!important}
++html[data-gt][data-gt][lang] body #coords-panel button:hover{background:var(--gt-fill-h)!important}
++html[data-gt][data-gt][lang] body #custom-scale-bar:is(.style-spruce,:not([class*="style-"])){--csb-bg:color-mix(in srgb,var(--gt-o-bg) 94%,transparent)!important;--csb-ink:var(--gt-o-ink)!important;--csb-muted:var(--gt-o-muted)!important;--csb-line:var(--gt-o-line)!important;--csb-alt:transparent!important;
++ background:var(--csb-bg)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r)!important}
++html[data-gt][data-gt][lang] body #custom-scale-bar:is(.style-spruce,:not([class*="style-"])) :is(span,div){color:inherit}
++html[data-gt][data-gt][lang] body #selected-leshoz-bar{background:var(--gt-o-bg)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r)!important;box-shadow:var(--gt-shadow)!important}
++html[data-gt][data-gt][lang] body #selected-leshoz-bar #slb-name{color:var(--gt-o-ink)!important}
++html[data-gt][data-gt][lang] body #selected-leshoz-bar #slb-count{color:var(--gt-o-muted)!important;background:transparent!important}
++html[data-gt][data-gt][lang] body #selected-leshoz-bar #slb-close{color:var(--gt-o-muted)!important;background:transparent!important}
++html[data-gt][data-gt][lang] body #selected-leshoz-bar #slb-close:hover{color:var(--gt-o-hover-ink)!important;background:var(--gt-o-hover)!important}
++html[data-gt][data-gt][lang] body #toast-container .toast{background:var(--gt-o-bg2)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r)!important;box-shadow:var(--gt-shadow-lg)!important}
++html[data-gt][data-gt][lang] body #toast-container .toast.error{background:var(--gt-err-bg)!important;color:var(--gt-err-ink)!important;border-color:var(--gt-err-bg)!important}
++html[data-gt][data-gt][lang] body #toast-container .toast :is(i,svg){color:inherit!important}
++html[data-gt][data-gt][lang] body .custom-popup{background:var(--gt-o-bg)!important;color:var(--gt-o-ink)!important;border:var(--gt-bw) solid var(--gt-o-line)!important;border-radius:var(--gt-r)!important;box-shadow:var(--gt-shadow-lg)!important}
++html[data-gt][data-gt][lang] body .custom-popup .popup-header{background:var(--gt-o-bg2)!important;color:var(--gt-o-ink)!important;border-color:var(--gt-o-line)!important}
++html[data-gt][data-gt][lang] body .custom-popup :is(h3,h4,.popup-val){color:var(--gt-o-ink)!important}
++html[data-gt][data-gt][lang] body .custom-popup .popup-label{color:var(--gt-o-muted)!important}
++/* «Съёмка по годам» */
++html[data-gt][data-gt][lang] body .ytl{background:var(--gt-o-bg)!important;color:var(--gt-o-ink)!important;border-color:var(--gt-o-line)!important;border-radius:var(--gt-r-lg)!important}
++html[data-gt][data-gt][lang] body .ytl :is(.ytl-title,.ytl-year,.ytl-cnt,.ytl-status,.ytl-mlab,.ytl-empty,.ytl-day){color:var(--gt-o-ink)!important}
++html[data-gt][data-gt][lang] body .ytl :is(.ytl-cnt,.ytl-status,.ytl-mlab,.ytl-empty){color:var(--gt-o-muted)!important}
++html[data-gt][data-gt][lang] body .ytl :is(.ytl-chip,.ytl-ibtn,.ytl-btn,.ytl-step,.ytl-sw,.ytl-card,.ytl-m){background:var(--gt-o-bg2)!important;color:var(--gt-o-ink)!important;border-color:var(--gt-o-line)!important}
++html[data-gt][data-gt][lang] body .ytl :is(.ytl-chip,.ytl-ibtn,.ytl-btn,.ytl-step,.ytl-card,.ytl-m):hover{background:var(--gt-o-hover)!important;color:var(--gt-o-hover-ink)!important}
++html[data-gt][data-gt][lang] body .ytl :is(.ytl-chip,.ytl-btn,.ytl-card,.ytl-m,.ytl-step):is(.on,.sel,.active){background:var(--gt-o-sel)!important;color:var(--gt-o-sel-ink)!important;border-color:var(--gt-o-acc)!important}
++/* модальные окна главной */
++html[data-gt][data-gt][lang] body :is(.modal-content,#profileModal .profile-modal-box,#hotkey-modal-box){background:var(--gt-card)!important;color:var(--gt-ink)!important;border:var(--gt-bw) solid var(--gt-line)!important;border-radius:var(--gt-r-lg)!important;box-shadow:var(--gt-shadow-lg)!important}
++html[data-gt][data-gt][lang] body .modal-content .modal-header{background:var(--gt-soft)!important;color:var(--gt-ink)!important;border-color:var(--gt-line)!important}
++html[data-gt][data-gt][lang] body :is(.modal-content,#profileModal .profile-modal-box) :is(label,h2,h3,h4){color:var(--gt-ink)!important}
++html[data-gt][data-gt][lang] body :is(.modal-content,#profileModal .profile-modal-box) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea){background:var(--gt-soft)!important;color:var(--gt-ink)!important;border:var(--gt-bw) solid var(--gt-line)!important;border-radius:var(--gt-r-sm)!important}
++html[data-gt][data-gt][lang] body #downloadBtn{background:var(--gt-c-bg)!important;color:var(--gt-c-ink)!important;border:var(--gt-bw) solid var(--gt-c-line)!important;border-radius:var(--gt-r)!important;box-shadow:var(--gt-shadow)!important}
++html[data-gt][data-gt][lang] body #downloadBtn:hover{background:var(--gt-c-hover)!important;color:var(--gt-c-hover-ink)!important}
++
++/* ---------- 5. «Сообщения» ---------- */
++html[data-gt][data-gt][lang] body .topbar{background:var(--gt-s-bg)!important;border-color:var(--gt-s-line)!important;color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .topbar::after{background:var(--gt-s-line)!important;opacity:.9}
++html[data-gt][data-gt][lang] body .topbar :is(.topbar-back,.topbar-icon){color:var(--gt-s-acc)!important;opacity:1!important}
++html[data-gt][data-gt][lang] body .topbar .topbar-back:hover{color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .topbar .topbar-title{color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .topbar .topbar-user{background:var(--gt-s-bg2)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .topbar .topbar-user:hover{background:var(--gt-s-hover)!important}
++html[data-gt][data-gt][lang] body .topbar .topbar-user:hover :is(.topbar-user-name,.topbar-user-caret){color:var(--gt-s-hover-ink)!important}
++html[data-gt][data-gt][lang] body .topbar .topbar-user-name{color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .topbar .topbar-user-caret{color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body .topbar-profile-menu{background:var(--gt-s-bg2)!important;border-color:var(--gt-s-line)!important;box-shadow:var(--gt-shadow-lg)!important;border-radius:var(--gt-r)!important}
++html[data-gt][data-gt][lang] body .topbar-profile-menu .tpm-item{color:var(--gt-s-ink)!important;background:transparent!important;border-radius:var(--gt-r-sm)!important}
++html[data-gt][data-gt][lang] body .topbar-profile-menu .tpm-item i{color:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .topbar-profile-menu .tpm-item:hover{background:var(--gt-s-hover)!important;color:var(--gt-s-hover-ink)!important}
++html[data-gt][data-gt][lang] body .topbar-profile-menu .tpm-item:hover i{color:inherit!important}
++html[data-gt][data-gt][lang] body .topbar-profile-menu .tpm-divider{background:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel{background:var(--gt-s-bg)!important;border-color:var(--gt-s-line)!important;color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialogs-header{border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel :is(.dialogs-header-title,.ds-icon,.dialogs-empty){color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialogs-search input{background:var(--gt-s-bg2)!important;border:var(--gt-bw) solid var(--gt-s-line)!important;color:var(--gt-s-ink)!important;border-radius:var(--gt-r)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialogs-search input::placeholder{color:var(--gt-s-muted)!important;opacity:1}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialogs-search input:focus{border-color:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item+.dialog-item::before{background:var(--gt-s-line)!important;opacity:.6}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item .dialog-name{color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item :is(.dialog-org,.dialog-last,.dialog-time){color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item .dialog-last.unread-msg{color:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item:hover{background:var(--gt-s-hover)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item:hover :is(.dialog-name,.dialog-org,.dialog-last,.dialog-time){color:var(--gt-s-hover-ink)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item.active{background:var(--gt-s-sel)!important;border-left-color:var(--gt-s-acc)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-item.active :is(.dialog-name,.dialog-org,.dialog-last,.dialog-time){color:var(--gt-s-sel-ink)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .dialog-unread-dot{border-color:var(--gt-s-bg)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel :is(.unread-pill,.btn-compose){background:var(--gt-s-fill)!important;color:var(--gt-s-on)!important}
++html[data-gt][data-gt][lang] body .dialogs-panel .btn-compose:hover{background:var(--gt-s-fill-h)!important}
++html[data-gt][data-gt][lang] body :is(.btn-new-msg,.btn-send,.btn-send-compose){background:var(--gt-fill)!important;color:var(--gt-on)!important;border-radius:var(--gt-r-btn)!important}
++html[data-gt][data-gt][lang] body :is(.btn-new-msg,.btn-send,.btn-send-compose):hover{background:var(--gt-fill-h)!important;color:var(--gt-on)!important}
++html[data-gt][data-gt][lang] body .from-me .msg-bubble{background:var(--gt-fill)!important;color:var(--gt-on)!important}
++html[data-gt][data-gt][lang] body .from-me .msg-bubble a{color:inherit!important;text-decoration:underline}
++html[data-gt][data-gt][lang] body .from-them .msg-bubble{background:var(--gt-card)!important;color:var(--gt-ink)!important;border-color:var(--gt-line)!important}
++html[data-gt][data-gt][lang] body :is(.from-me,.from-them) .msg-time{color:var(--gt-muted)!important}
++html[data-gt][data-gt][lang] body .chat-panel{background:var(--gt-bg)!important}
++html[data-gt][data-gt][lang] body :is(.chat-header,.chat-input-area){background:var(--gt-card)!important;border-color:var(--gt-line)!important}
++html[data-gt][data-gt][lang] body .chat-textarea{background:var(--gt-soft)!important;color:var(--gt-ink)!important;border-color:var(--gt-line)!important;border-radius:var(--gt-r)!important}
++html[data-gt][data-gt][lang] body .chat-textarea::placeholder{color:var(--gt-muted)!important;opacity:1}
++html[data-gt][data-gt][lang] body .btn-action{background:var(--gt-soft)!important;color:var(--gt-muted)!important;border-color:var(--gt-line)!important;border-radius:var(--gt-r-btn)!important}
++html[data-gt][data-gt][lang] body .btn-action:hover{background:var(--gt-hover)!important;color:var(--gt-hover-ink)!important;border-color:var(--gt-accent)!important}
++html[data-gt][data-gt][lang] body .msg-date-sep span{background:var(--gt-bg)!important;color:var(--gt-muted)!important}
++html[data-gt][data-gt][lang] body :is(.compose-modal,#emoji-picker){background:var(--gt-card)!important;color:var(--gt-ink)!important;border-color:var(--gt-line)!important;border-radius:var(--gt-r-lg)!important}
++html[data-gt][data-gt][lang] body .compose-title{color:var(--gt-ink)!important}
++html[data-gt][data-gt][lang] body .compose-label{color:var(--gt-muted)!important}
++
++/* ---------- 6. «Методички», вход и служебные страницы ---------- */
++html[data-gt][data-gt][lang] body.mv18 .top{background:var(--gt-s-bg)!important;color:var(--gt-s-ink)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body.mv18 .top :is(a,h1,small){color:var(--gt-s-ink)!important}
++html[data-gt][data-gt][lang] body.mv18 .top a.nav:hover{background:var(--gt-s-hover)!important;color:var(--gt-s-hover-ink)!important}
++html[data-gt][data-gt][lang] body.f-body .f-card{background:var(--f-glass)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body.f-body .f-title{color:var(--gt-s-ink)!important;text-shadow:none!important}
++html[data-gt][data-gt][lang] body.f-body .f-input input{background:var(--gt-s-bg2)!important;color:var(--gt-s-ink)!important;border-color:var(--gt-s-line)!important}
++html[data-gt][data-gt][lang] body.f-body .f-input input::placeholder{color:var(--gt-s-muted)!important;opacity:1}
++html[data-gt][data-gt][lang] body.f-body .f-input i{color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body.f-body .f-btn{background:var(--gt-s-fill)!important;color:var(--gt-s-on)!important;box-shadow:none!important;border-radius:var(--gt-r-btn)!important}
++html[data-gt][data-gt][lang] body.f-body .f-btn:hover{background:var(--gt-s-fill-h)!important}
++html[data-gt][data-gt][lang] body.f-body .f-eyebrow{color:var(--gt-s-muted)!important}
++html[data-gt][data-gt][lang] body.f-body .f-note{background:var(--gt-s-soft)!important}
++html[data-gt][data-gt][lang] body.f-body .f-chip{color:var(--gt-s-ink)!important;background:var(--gt-s-soft)!important;border-color:var(--gt-s-line)!important}
+
+--- /dev/null
++++ b/static/themes/gt-field.css
+@@ -0,0 +1,6 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Полевой планшет» (field): тёплая светлая, крупная.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="field"]{--gt-font:"PT Sans","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;--gt-scheme:light;--gt-bg:#f2ede2;--gt-card:#fffcf5;--gt-soft:#f7f1e4;--gt-tint:#ece3cf;--gt-ink:#1e1a12;--gt-muted:#5a5141;--gt-line:#d3c6ab;--gt-accent:#1d6b30;--gt-fill:#1d6b30;--gt-fill-h:#165826;--gt-on:#ffffff;--gt-on-acc:#ffffff;--gt-danger:#b3261e;--gt-warn:#8a4b00;--gt-warn-bg:#fdebc8;--gt-ok:#1d6b30;--gt-err-bg:#b3261e;--gt-err-ink:#ffffff;--gt-hover:#e6efdb;--gt-hover-ink:#143d1d;--gt-press:#d9e8cc;--gt-sel:#d9e8cc;--gt-sel-ink:#123619;--gt-s-bg:#183626;--gt-s-bg2:#1f4430;--gt-s-soft:#24503a;--gt-s-ink:#f7f1e3;--gt-s-muted:#cbd8c6;--gt-s-line:#3d6650;--gt-s-acc:#ffd27a;--gt-s-fill:#ffd27a;--gt-s-fill-h:#ffdf9e;--gt-s-on:#1e1a12;--gt-s-hover:#2a5a40;--gt-s-hover-ink:#ffffff;--gt-s-sel:#2f6448;--gt-s-sel-ink:#fff7e6;--gt-s-danger:#ffb4a8;--gt-head-bg:#183626;--gt-head-ink:#fff7e6;--gt-head-muted:#e4dcc6;--gt-head-plate:rgba(12,30,20,.55);--gt-scene:block;--gt-scene-filter:sepia(.3) saturate(1.15);--gt-scene-op:1;--gt-o-bg:#fffcf5;--gt-o-bg2:#f7f1e4;--gt-o-ink:#1e1a12;--gt-o-muted:#5a5141;--gt-o-line:#d3c6ab;--gt-o-acc:#1d6b30;--gt-o-hover:#e6efdb;--gt-o-sel:#d9e8cc;--gt-c-bg:#fffcf5;--gt-c-ink:#1e1a12;--gt-c-line:#c9bb9c;--gt-c-hover:#e6efdb;--gt-c-hover-ink:#143d1d;--gt-c-on-bg:#1d6b30;--gt-c-on-ink:#ffffff;--gt-c-plate:transparent;--gt-r:12px;--gt-r-sm:10px;--gt-r-lg:16px;--gt-r-btn:10px;--gt-ctl:40px;--gt-mib:52px;--gt-mib-icon:24px;--gt-nav:44px;--gt-stroke:2;--gt-bw:1.5px;--gt-fs:15px;--gt-focus:#d9480f;--gt-focus-w:3px;--gt-tt:none;--gt-ls:0;--gt-shadow:0 1px 2px rgb(60 45 20/.12),0 6px 16px rgb(60 45 20/.14);--gt-shadow-lg:0 4px 12px rgb(60 45 20/.14),0 18px 40px rgb(60 45 20/.18);--gt-o-hover-ink:#143d1d;--gt-o-sel-ink:#123619}
++html[data-gt][data-gt][lang][data-gt="field"],html[data-gt][data-gt][lang][data-gt="field"] body{--mib-btn-size:52px!important;--mib-icon-size:24px!important;--map-nav-size:44px!important;--map-nav-icon-size:22px!important}
++html[data-gt][data-gt][lang][data-gt="field"] body:not(.fullscreen-mode) #map-icon-bar{width:calc(52px + 14px)!important}
++html[data-gt][data-gt][lang][data-gt="field"] body #sf-profile-menu .sf-profile-menu-item{min-height:44px!important}
+
+--- /dev/null
++++ b/static/themes/gt-fonts.css
+@@ -0,0 +1,76 @@
++/* Геосервис ОДЗиМЛ v20.9 — шрифты модулей оформления (все — SIL Open Font License 1.1, см. fonts/OFL.txt).
++   Файлы локальные (без интернета); браузер скачивает только начертания, которые реально нужны на экране. */
++@font-face{font-family:"Inter";font-style:normal;font-weight:400;font-display:swap;src:url("/static/fonts/inter-400.woff2?v=4.1") format("woff2")}
++@font-face{font-family:"Inter";font-style:normal;font-weight:500;font-display:swap;src:url("/static/fonts/inter-500.woff2?v=4.1") format("woff2")}
++@font-face{font-family:"Inter";font-style:normal;font-weight:600;font-display:swap;src:url("/static/fonts/inter-600.woff2?v=4.1") format("woff2")}
++@font-face{font-family:"Inter";font-style:normal;font-weight:700;font-display:swap;src:url("/static/fonts/inter-700.woff2?v=4.1") format("woff2")}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/fira-sans-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/fira-sans-cyrillic-500.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/fira-sans-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/fira-sans-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/fira-sans-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/fira-sans-latin-500.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/fira-sans-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Fira Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/fira-sans-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/golos-text-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/golos-text-cyrillic-500.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/golos-text-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/golos-text-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/golos-text-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/golos-text-latin-500.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/golos-text-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Golos Text";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/golos-text-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/ibm-plex-mono-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/ibm-plex-mono-cyrillic-500.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/ibm-plex-mono-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/ibm-plex-mono-latin-500.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/ibm-plex-sans-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/ibm-plex-sans-cyrillic-500.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/ibm-plex-sans-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/ibm-plex-sans-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/ibm-plex-sans-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/ibm-plex-sans-latin-500.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/ibm-plex-sans-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/ibm-plex-sans-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/jetbrains-mono-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/jetbrains-mono-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/jetbrains-mono-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/jetbrains-mono-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/manrope-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/manrope-cyrillic-500.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/manrope-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/manrope-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/manrope-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/manrope-latin-500.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/manrope-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Manrope";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/manrope-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Onest";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/onest-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Onest";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/onest-cyrillic-500.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Onest";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/onest-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Onest";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/onest-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Onest";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/onest-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Onest";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/onest-latin-500.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Onest";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/onest-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Onest";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/onest-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Open Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/open-sans-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Open Sans";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/open-sans-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Open Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/open-sans-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Open Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/open-sans-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Open Sans";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/open-sans-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Open Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/open-sans-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"PT Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/pt-sans-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"PT Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/pt-sans-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"PT Sans";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/pt-sans-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"PT Sans";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/pt-sans-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Roboto";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/roboto-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Roboto";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/roboto-cyrillic-500.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Roboto";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/roboto-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Roboto";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/roboto-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Roboto";font-style:normal;font-weight:500;font-display:swap;src:url("fonts/roboto-latin-500.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Roboto";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/roboto-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/source-sans-3-cyrillic-400.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/source-sans-3-cyrillic-600.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/source-sans-3-cyrillic-700.woff2") format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
++@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:400;font-display:swap;src:url("fonts/source-sans-3-latin-400.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:600;font-display:swap;src:url("fonts/source-sans-3-latin-600.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
++@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:700;font-display:swap;src:url("fonts/source-sans-3-latin-700.woff2") format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+
+--- /dev/null
++++ b/static/themes/gt-gis.css
+@@ -0,0 +1,11 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «ГИС-классика» (gis): светло-серая, с подписями.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="gis"]{--gt-font:"Source Sans 3","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;--gt-scheme:light;--gt-bg:#eceff2;--gt-card:#ffffff;--gt-soft:#f3f5f7;--gt-tint:#e4e8ec;--gt-ink:#1b1f24;--gt-muted:#4f5864;--gt-line:#c4cbd3;--gt-accent:#0a59c2;--gt-fill:#0a59c2;--gt-fill-h:#084aa3;--gt-on:#ffffff;--gt-on-acc:#ffffff;--gt-danger:#b3261e;--gt-warn:#7a5200;--gt-warn-bg:#fff3cd;--gt-ok:#1e6b2e;--gt-err-bg:#b3261e;--gt-err-ink:#ffffff;--gt-hover:#e3edfb;--gt-hover-ink:#08367a;--gt-press:#d5e4f8;--gt-sel:#d2e3fa;--gt-sel-ink:#062c63;--gt-s-bg:#e6e9ed;--gt-s-bg2:#ffffff;--gt-s-soft:#dde2e7;--gt-s-ink:#1b1f24;--gt-s-muted:#4b5460;--gt-s-line:#c4cbd3;--gt-s-acc:#0a59c2;--gt-s-fill:#0a59c2;--gt-s-fill-h:#084aa3;--gt-s-on:#ffffff;--gt-s-hover:#d6e4f7;--gt-s-hover-ink:#08367a;--gt-s-sel:#cfe0f8;--gt-s-danger:#b3261e;--gt-head-bg:#2c3e50;--gt-head-ink:#ffffff;--gt-head-muted:#d6dee7;--gt-head-plate:transparent;--gt-scene:none;--gt-scene-filter:none;--gt-scene-op:0;--gt-o-bg:#ffffff;--gt-o-bg2:#f3f5f7;--gt-o-ink:#1b1f24;--gt-o-muted:#4f5864;--gt-o-line:#c4cbd3;--gt-o-acc:#0a59c2;--gt-o-hover:#e3edfb;--gt-o-sel:#d2e3fa;--gt-c-bg:#ffffff;--gt-c-ink:#2b3138;--gt-c-line:#b7c0ca;--gt-c-hover:#e3edfb;--gt-c-hover-ink:#08367a;--gt-c-on-bg:#0a59c2;--gt-c-on-ink:#ffffff;--gt-c-plate:transparent;--gt-r:3px;--gt-r-sm:2px;--gt-r-lg:4px;--gt-r-btn:3px;--gt-ctl:30px;--gt-mib:64px;--gt-mib-icon:20px;--gt-nav:32px;--gt-stroke:1.6;--gt-bw:1px;--gt-fs:14px;--gt-focus:#0a59c2;--gt-focus-w:2px;--gt-tt:none;--gt-ls:0;--gt-shadow:0 1px 2px rgb(20 30 45/.18);--gt-shadow-lg:0 3px 10px rgb(20 30 45/.18),0 12px 28px rgb(20 30 45/.14);--gt-s-sel-ink:#062c63;--gt-o-hover-ink:#08367a;--gt-o-sel-ink:#062c63}
++html[data-gt][data-gt][lang][data-gt="gis"],html[data-gt][data-gt][lang][data-gt="gis"] body{--mib-btn-size:64px!important;--mib-icon-size:20px!important;--map-nav-size:32px!important;--map-nav-icon-size:18px!important}
++html[data-gt][data-gt][lang][data-gt="gis"] body:not(.fullscreen-mode) #map-icon-bar{width:calc(var(--gt-mib) + 14px)!important}
++html[data-gt][data-gt][lang][data-gt="gis"] body #map-icon-bar>button.mib-btn{width:var(--gt-mib)!important;min-width:var(--gt-mib)!important;height:auto!important;min-height:50px!important;flex-direction:column!important;gap:2px!important;padding:5px 2px 4px!important}
++html[data-gt][data-gt][lang][data-gt="gis"] body #map-icon-bar{gap:2px!important;row-gap:2px!important}
++html[data-gt][data-gt][lang][data-gt="gis"] body #map-icon-bar>button.mib-btn .mib-tip{position:static!important;transform:none!important;opacity:1!important;visibility:visible!important;background:none!important;color:inherit!important;box-shadow:none!important;border:0!important;border-radius:0!important;padding:0 1px!important;margin:0!important;font-size:10px!important;font-weight:600!important;line-height:1.15!important;letter-spacing:0!important;white-space:normal!important;text-align:center!important;width:100%!important;max-width:100%!important;display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden!important;pointer-events:none!important}
++html[data-gt][data-gt][lang][data-gt="gis"]{--gt-lmix:100%;--gt-lmix2:100%}
++html[data-gt][data-gt][lang][data-gt="gis"] body .sidebar .forest-header{border-bottom:1px solid #1c2a38!important}
++html[data-gt][data-gt][lang][data-gt="gis"] body #map-icon-bar{border-radius:var(--gt-r)!important}
+
+--- /dev/null
++++ b/static/themes/gt-gov.css
+@@ -0,0 +1,6 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Госстандарт» (gov): светлая официальная.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="gov"]{--gt-font:"Open Sans","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;--gt-scheme:light;--gt-bg:#f1f3f6;--gt-card:#ffffff;--gt-soft:#f5f7fa;--gt-tint:#e7ebf0;--gt-ink:#1a1d21;--gt-muted:#4f5761;--gt-line:#ccd3db;--gt-accent:#1e6b3a;--gt-fill:#1e6b3a;--gt-fill-h:#175a30;--gt-on:#ffffff;--gt-on-acc:#ffffff;--gt-danger:#b3202a;--gt-warn:#7a5200;--gt-warn-bg:#fff3cd;--gt-ok:#1e6b3a;--gt-err-bg:#b3202a;--gt-err-ink:#ffffff;--gt-hover:#e8f1eb;--gt-hover-ink:#0f3d20;--gt-press:#d6e9dc;--gt-sel:#d6e9dc;--gt-sel-ink:#0c3219;--gt-s-bg:#ffffff;--gt-s-bg2:#f4f6f8;--gt-s-soft:#eef1f4;--gt-s-ink:#1a1d21;--gt-s-muted:#4f5761;--gt-s-line:#d5dbe2;--gt-s-acc:#1e6b3a;--gt-s-fill:#1e6b3a;--gt-s-fill-h:#175a30;--gt-s-on:#ffffff;--gt-s-hover:#e8f1eb;--gt-s-hover-ink:#0f3d20;--gt-s-sel:#dcece1;--gt-s-danger:#b3202a;--gt-head-bg:linear-gradient(180deg,#b3202a 0,#b3202a 66%,#1e6b3a 66%,#1e6b3a 100%);--gt-head-ink:#ffffff;--gt-head-muted:#ffe9ea;--gt-head-plate:transparent;--gt-scene:none;--gt-scene-filter:none;--gt-scene-op:0;--gt-o-bg:#ffffff;--gt-o-bg2:#f5f7fa;--gt-o-ink:#1a1d21;--gt-o-muted:#4f5761;--gt-o-line:#ccd3db;--gt-o-acc:#1e6b3a;--gt-o-hover:#e8f1eb;--gt-o-sel:#d6e9dc;--gt-c-bg:#ffffff;--gt-c-ink:#1a1d21;--gt-c-line:#c3cbd4;--gt-c-hover:#e8f1eb;--gt-c-hover-ink:#0f3d20;--gt-c-on-bg:#1e6b3a;--gt-c-on-ink:#ffffff;--gt-c-plate:#eef1f4;--gt-r:4px;--gt-r-sm:3px;--gt-r-lg:6px;--gt-r-btn:4px;--gt-ctl:34px;--gt-mib:40px;--gt-mib-icon:20px;--gt-nav:34px;--gt-stroke:1.75;--gt-bw:1px;--gt-fs:14.5px;--gt-focus:#b3202a;--gt-focus-w:2px;--gt-tt:none;--gt-ls:0;--gt-shadow:0 1px 2px rgb(20 25 35/.12);--gt-shadow-lg:0 3px 10px rgb(20 25 35/.12),0 14px 32px rgb(20 25 35/.14);--gt-s-sel-ink:#0c3219;--gt-o-hover-ink:#0f3d20;--gt-o-sel-ink:#0c3219}
++html[data-gt][data-gt][lang][data-gt="gov"] body #map-icon-bar>button.mib-btn{background:var(--gt-c-plate)!important;border-radius:var(--gt-r-sm)!important;box-shadow:inset 0 0 0 1px var(--gt-c-line)!important}
++html[data-gt][data-gt][lang][data-gt="gov"] body .topbar::after{height:4px!important;opacity:1!important;background:linear-gradient(90deg,#b3202a 0 66%,#1e6b3a 66%)!important}
++html[data-gt][data-gt][lang][data-gt="gov"] body .sidebar .fh-title{font-weight:700!important}
+
+--- /dev/null
++++ b/static/themes/gt-graphite.css
+@@ -0,0 +1,3 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Графит» (graphite): тёмная нейтральная, компактная.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="graphite"]{--gt-font:"IBM Plex Sans","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;--gt-scheme:dark;--gt-bg:#17191c;--gt-card:#1f2226;--gt-soft:#272b30;--gt-tint:#30353b;--gt-ink:#eceef1;--gt-muted:#aab0b9;--gt-line:#424851;--gt-accent:#ffb547;--gt-fill:#ffb547;--gt-fill-h:#ffc56b;--gt-on:#1d1405;--gt-on-acc:#1d1405;--gt-danger:#ff8f85;--gt-warn:#ffd479;--gt-warn-bg:#3a2e17;--gt-ok:#8fd694;--gt-err-bg:#7d2420;--gt-err-ink:#ffffff;--gt-hover:#30353c;--gt-hover-ink:#ffffff;--gt-press:#383e46;--gt-sel:#3b3122;--gt-sel-ink:#ffe4b8;--gt-s-bg:#121416;--gt-s-bg2:#1b1e21;--gt-s-soft:#212428;--gt-s-ink:#e8eaed;--gt-s-muted:#a4aab2;--gt-s-line:#353b42;--gt-s-acc:#ffb547;--gt-s-fill:#ffb547;--gt-s-fill-h:#ffc56b;--gt-s-on:#1d1405;--gt-s-hover:#2a2e33;--gt-s-hover-ink:#ffffff;--gt-s-sel:#33291b;--gt-s-danger:#ff8f85;--gt-head-bg:#121416;--gt-head-ink:#f4f5f7;--gt-head-muted:#c9cdd3;--gt-head-plate:rgba(10,11,13,.6);--gt-scene:block;--gt-scene-filter:grayscale(1) brightness(.72) contrast(1.1);--gt-scene-op:.9;--gt-o-bg:#17191c;--gt-o-bg2:#202328;--gt-o-ink:#eceef1;--gt-o-muted:#a9afb8;--gt-o-line:#3d434b;--gt-o-acc:#ffb547;--gt-o-hover:#30353c;--gt-o-sel:#3b3122;--gt-c-bg:#1f2226;--gt-c-ink:#e6e8eb;--gt-c-line:#3d434b;--gt-c-hover:#30353b;--gt-c-hover-ink:#ffffff;--gt-c-on-bg:#ffb547;--gt-c-on-ink:#1d1405;--gt-c-plate:transparent;--gt-r:6px;--gt-r-sm:4px;--gt-r-lg:8px;--gt-r-btn:5px;--gt-ctl:30px;--gt-mib:36px;--gt-mib-icon:18px;--gt-nav:32px;--gt-stroke:1.5;--gt-bw:1px;--gt-fs:13.5px;--gt-focus:#7cc4ff;--gt-focus-w:2px;--gt-tt:uppercase;--gt-ls:.05em;--gt-shadow:0 1px 2px rgb(0 0 0/.4);--gt-shadow-lg:0 6px 20px rgb(0 0 0/.45);--gt-s-sel-ink:#ffe4b8;--gt-o-hover-ink:#ffffff;--gt-o-sel-ink:#ffe4b8}
+
+--- /dev/null
++++ b/static/themes/gt-navy.css
+@@ -0,0 +1,6 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Штаб» (navy): тёмно-синяя, «пульт».
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="navy"]{--gt-font:"Roboto","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;--gt-scheme:dark;--gt-bg:#0e1726;--gt-card:#142036;--gt-soft:#1a2944;--gt-tint:#223454;--gt-ink:#e9eff8;--gt-muted:#a8b7cd;--gt-line:#34496d;--gt-accent:#5cc0ff;--gt-fill:#5cc0ff;--gt-fill-h:#86d1ff;--gt-on:#04131f;--gt-on-acc:#04131f;--gt-danger:#ff8d8d;--gt-warn:#ffd27a;--gt-warn-bg:#33291a;--gt-ok:#6fe0a8;--gt-err-bg:#7d1f2b;--gt-err-ink:#ffffff;--gt-hover:#22355a;--gt-hover-ink:#ffffff;--gt-press:#2a4069;--gt-sel:#1f3d63;--gt-sel-ink:#e6f5ff;--gt-s-bg:#0a1220;--gt-s-bg2:#111c30;--gt-s-soft:#16243c;--gt-s-ink:#e7eef8;--gt-s-muted:#a2b2c9;--gt-s-line:#2a3c5c;--gt-s-acc:#5cc0ff;--gt-s-fill:#5cc0ff;--gt-s-fill-h:#86d1ff;--gt-s-on:#04131f;--gt-s-hover:#1c2d4c;--gt-s-hover-ink:#ffffff;--gt-s-sel:#1b3556;--gt-s-danger:#ff8d8d;--gt-head-bg:#0a1220;--gt-head-ink:#eef4ff;--gt-head-muted:#c4d3ea;--gt-head-plate:rgba(5,10,20,.55);--gt-scene:block;--gt-scene-filter:hue-rotate(95deg) saturate(.7) brightness(.85);--gt-scene-op:.95;--gt-o-bg:#0e1726;--gt-o-bg2:#162338;--gt-o-ink:#e9eff8;--gt-o-muted:#a8b7cd;--gt-o-line:#34496d;--gt-o-acc:#5cc0ff;--gt-o-hover:#22355a;--gt-o-sel:#1f3d63;--gt-c-bg:#142036;--gt-c-ink:#dfe8f5;--gt-c-line:#34496d;--gt-c-hover:#22355a;--gt-c-hover-ink:#ffffff;--gt-c-on-bg:#5cc0ff;--gt-c-on-ink:#04131f;--gt-c-plate:#1d2d4a;--gt-r:14px;--gt-r-sm:10px;--gt-r-lg:18px;--gt-r-btn:999px;--gt-ctl:34px;--gt-mib:42px;--gt-mib-icon:20px;--gt-nav:36px;--gt-stroke:1.75;--gt-bw:1px;--gt-fs:14px;--gt-focus:#ffd166;--gt-focus-w:2px;--gt-tt:none;--gt-ls:.01em;--gt-shadow:0 2px 6px rgb(0 0 0/.35),0 8px 22px rgb(0 0 0/.3);--gt-shadow-lg:0 6px 16px rgb(0 0 0/.35),0 22px 48px rgb(0 0 0/.4);--gt-s-sel-ink:#e6f5ff;--gt-o-hover-ink:#ffffff;--gt-o-sel-ink:#e6f5ff}
++html[data-gt][data-gt][lang][data-gt="navy"] body #map-icon-bar>button.mib-btn{background:var(--gt-c-plate)!important;border-radius:999px!important}
++html[data-gt][data-gt][lang][data-gt="navy"] body #map-nav-group .map-nav-btn{border-radius:999px!important}
++html[data-gt][data-gt][lang][data-gt="navy"] body :is(#map-geoloc-btn,#map-view3d-btn,#map-fullscreen-btn){border-radius:999px!important}
+
+--- /dev/null
++++ b/static/themes/gt-swiss.css
+@@ -0,0 +1,7 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Швейцарский» (swiss): белый, строгий, без скруглений.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="swiss"]{--gt-font:"Onest","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;--gt-scheme:light;--gt-bg:#ffffff;--gt-card:#ffffff;--gt-soft:#f4f4f4;--gt-tint:#ebebeb;--gt-ink:#111111;--gt-muted:#4a4a4a;--gt-line:#111111;--gt-accent:#d7191c;--gt-fill:#111111;--gt-fill-h:#333333;--gt-on:#ffffff;--gt-on-acc:#ffffff;--gt-danger:#c8102e;--gt-warn:#8a5a00;--gt-warn-bg:#fff5d6;--gt-ok:#0f6b2f;--gt-err-bg:#c8102e;--gt-err-ink:#ffffff;--gt-hover:#111111;--gt-hover-ink:#ffffff;--gt-press:#333333;--gt-sel:#d7191c;--gt-sel-ink:#ffffff;--gt-s-bg:#ffffff;--gt-s-bg2:#ffffff;--gt-s-soft:#f4f4f4;--gt-s-ink:#111111;--gt-s-muted:#4a4a4a;--gt-s-line:#111111;--gt-s-acc:#d7191c;--gt-s-fill:#111111;--gt-s-fill-h:#333333;--gt-s-on:#ffffff;--gt-s-hover:#111111;--gt-s-hover-ink:#ffffff;--gt-s-sel:#d7191c;--gt-s-danger:#c8102e;--gt-head-bg:#ffffff;--gt-head-ink:#111111;--gt-head-muted:#4a4a4a;--gt-head-plate:transparent;--gt-scene:none;--gt-scene-filter:none;--gt-scene-op:0;--gt-o-bg:#ffffff;--gt-o-bg2:#f4f4f4;--gt-o-ink:#111111;--gt-o-muted:#4a4a4a;--gt-o-line:#111111;--gt-o-acc:#d7191c;--gt-o-hover:#111111;--gt-o-sel:#d7191c;--gt-c-bg:#ffffff;--gt-c-ink:#111111;--gt-c-line:#111111;--gt-c-hover:#111111;--gt-c-hover-ink:#ffffff;--gt-c-on-bg:#d7191c;--gt-c-on-ink:#ffffff;--gt-c-plate:transparent;--gt-r:0px;--gt-r-sm:0px;--gt-r-lg:0px;--gt-r-btn:0px;--gt-ctl:32px;--gt-mib:40px;--gt-mib-icon:20px;--gt-nav:34px;--gt-stroke:1.5;--gt-bw:1px;--gt-fs:14px;--gt-focus:#0050d0;--gt-focus-w:2px;--gt-tt:uppercase;--gt-ls:.07em;--gt-shadow:none;--gt-shadow-lg:4px 4px 0 #111111;--gt-s-sel-ink:#ffffff;--gt-o-hover-ink:#ffffff;--gt-o-sel-ink:#ffffff}
++html[data-gt][data-gt][lang][data-gt="swiss"] body .sidebar .forest-header{border-bottom:2px solid #111111!important}
++html[data-gt][data-gt][lang][data-gt="swiss"] body .sidebar .fh-title{font-weight:800!important;letter-spacing:-.01em!important}
++html[data-gt][data-gt][lang][data-gt="swiss"] body :is(#map-icon-bar,#map-nav-group,#coords-panel,#map-slide-panel,#sf-profile-menu,#custom-scale-bar,#selected-leshoz-bar){border-width:1px!important;border-color:#111111!important}
++html[data-gt][data-gt][lang][data-gt="swiss"] body .topbar{border-bottom:2px solid #111111!important}
+
+--- /dev/null
++++ b/static/themes/gt-taiga.css
+@@ -0,0 +1,3 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Тайга-сумерки» (taiga): тёмная бирюзовая, мягкая.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="taiga"]{--gt-font:"Manrope","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;--gt-scheme:dark;--gt-bg:#0b1b1d;--gt-card:#112628;--gt-soft:#173236;--gt-tint:#1d3d41;--gt-ink:#e6f4f2;--gt-muted:#a1bfba;--gt-line:#30565a;--gt-accent:#2ed3b7;--gt-fill:#2ed3b7;--gt-fill-h:#5ae0c9;--gt-on:#032621;--gt-on-acc:#032621;--gt-danger:#ff9a85;--gt-warn:#ffcf73;--gt-warn-bg:#33291a;--gt-ok:#5fe3a1;--gt-err-bg:#7a2a20;--gt-err-ink:#ffffff;--gt-hover:#1d3d41;--gt-hover-ink:#ffffff;--gt-press:#24494d;--gt-sel:#17423d;--gt-sel-ink:#dffcf6;--gt-s-bg:#081517;--gt-s-bg2:#0f2224;--gt-s-soft:#142c2f;--gt-s-ink:#e3f2ef;--gt-s-muted:#9ab8b3;--gt-s-line:#284a4e;--gt-s-acc:#2ed3b7;--gt-s-fill:#2ed3b7;--gt-s-fill-h:#5ae0c9;--gt-s-on:#032621;--gt-s-hover:#18373a;--gt-s-hover-ink:#ffffff;--gt-s-sel:#16403b;--gt-s-danger:#ff9a85;--gt-head-bg:#081517;--gt-head-ink:#eafffb;--gt-head-muted:#bfe0da;--gt-head-plate:rgba(4,14,15,.55);--gt-scene:block;--gt-scene-filter:hue-rotate(45deg) saturate(.9) brightness(.85);--gt-scene-op:1;--gt-o-bg:#0b1b1d;--gt-o-bg2:#132a2d;--gt-o-ink:#e6f4f2;--gt-o-muted:#a1bfba;--gt-o-line:#30565a;--gt-o-acc:#2ed3b7;--gt-o-hover:#1d3d41;--gt-o-sel:#17423d;--gt-c-bg:#112628;--gt-c-ink:#dcefec;--gt-c-line:#30565a;--gt-c-hover:#1d3d41;--gt-c-hover-ink:#ffffff;--gt-c-on-bg:#2ed3b7;--gt-c-on-ink:#032621;--gt-c-plate:transparent;--gt-r:14px;--gt-r-sm:10px;--gt-r-lg:18px;--gt-r-btn:12px;--gt-ctl:34px;--gt-mib:42px;--gt-mib-icon:20px;--gt-nav:36px;--gt-stroke:1.75;--gt-bw:1px;--gt-fs:14px;--gt-focus:#ff8a65;--gt-focus-w:2px;--gt-tt:none;--gt-ls:0;--gt-shadow:0 2px 6px rgb(0 0 0/.3),0 10px 24px rgb(0 0 0/.3);--gt-shadow-lg:0 6px 16px rgb(0 0 0/.35),0 24px 52px rgb(0 0 0/.4);--gt-s-sel-ink:#dffcf6;--gt-o-hover-ink:#ffffff;--gt-o-sel-ink:#dffcf6}
+
+--- /dev/null
++++ b/static/themes/gt-white.css
+@@ -0,0 +1,4 @@
++/* Геосервис ОДЗиМЛ v20.9 — тема «Белая карта» (white): светлая, спокойная.
++   Файл создан gen_themes.py из themes_def.py — правьте источник, а не этот файл. */
++html[data-gt="white"]{--gt-font:"Inter","Segoe UI",system-ui,-apple-system,Arial,sans-serif;--gt-mono:ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;--gt-scheme:light;--gt-bg:#f3f5f4;--gt-card:#ffffff;--gt-soft:#eef2ef;--gt-tint:#e3ebe5;--gt-ink:#15201a;--gt-muted:#56635b;--gt-line:#cfd8d2;--gt-accent:#147a3a;--gt-fill:#147a3a;--gt-fill-h:#0f6830;--gt-on:#ffffff;--gt-on-acc:#ffffff;--gt-danger:#b42318;--gt-warn:#8a5a00;--gt-warn-bg:#fff4d6;--gt-ok:#146c2e;--gt-err-bg:#b42318;--gt-err-ink:#ffffff;--gt-hover:#e6f2ea;--gt-hover-ink:#0c3a1d;--gt-press:#d9eadf;--gt-sel:#d7ecdd;--gt-sel-ink:#0a3018;--gt-s-bg:#ffffff;--gt-s-bg2:#f3f6f4;--gt-s-soft:#eef2ef;--gt-s-ink:#15201a;--gt-s-muted:#56635b;--gt-s-line:#dde4df;--gt-s-acc:#147a3a;--gt-s-fill:#147a3a;--gt-s-fill-h:#0f6830;--gt-s-on:#ffffff;--gt-s-hover:#e6f2ea;--gt-s-hover-ink:#0c3a1d;--gt-s-sel:#dcefe2;--gt-s-danger:#b42318;--gt-head-bg:#0f2a1b;--gt-head-ink:#ffffff;--gt-head-muted:#d5e8da;--gt-head-plate:rgba(8,24,14,.5);--gt-scene:block;--gt-scene-filter:saturate(.9);--gt-scene-op:1;--gt-o-bg:#ffffff;--gt-o-bg2:#f3f6f4;--gt-o-ink:#15201a;--gt-o-muted:#56635b;--gt-o-line:#cfd8d2;--gt-o-acc:#147a3a;--gt-o-hover:#e6f2ea;--gt-o-sel:#d7ecdd;--gt-c-bg:#ffffff;--gt-c-ink:#24302a;--gt-c-line:#cfd8d2;--gt-c-hover:#e6f2ea;--gt-c-hover-ink:#0c3a1d;--gt-c-on-bg:#147a3a;--gt-c-on-ink:#ffffff;--gt-c-plate:transparent;--gt-r:12px;--gt-r-sm:8px;--gt-r-lg:16px;--gt-r-btn:10px;--gt-ctl:34px;--gt-mib:40px;--gt-mib-icon:20px;--gt-nav:34px;--gt-stroke:1.75;--gt-bw:1px;--gt-fs:14px;--gt-focus:#0b62d6;--gt-focus-w:2px;--gt-tt:none;--gt-ls:0;--gt-shadow:0 1px 2px rgb(16 32 24/.08),0 6px 18px rgb(16 32 24/.10);--gt-shadow-lg:0 4px 12px rgb(16 32 24/.10),0 20px 44px rgb(16 32 24/.16);--gt-s-sel-ink:#0a3018;--gt-o-hover-ink:#0c3a1d;--gt-o-sel-ink:#0a3018}
++html[data-gt][data-gt][lang][data-gt="white"]{--gt-lmix:72%;--gt-lmix2:90%}
+
+--- /dev/null
++++ b/static/themes/gt.js
+@@ -0,0 +1,490 @@
++/* ==========================================================================
++   Геосервис ОДЗиМЛ v20.9 — модули оформления: окно «Оформление» и «Страж контраста».
++   Подключается из gt-boot.js (асинхронно). API: window.GeoTheme
++     .open() / .close()            — окно выбора (также Alt+Shift+T и любой элемент [data-gt-open])
++     .set('bor'|…|'classic')       — применить и сохранить тему (localStorage gt_theme)
++     .get()                        — текущая тема ('' = «Как сейчас»)
++     .audit({fix:false, root})     — проверка контраста видимого текста и значков (для тестов/консоли)
++     .guard.enable(true|false)     — «Страж контраста» (localStorage gt_guard, по умолчанию включён)
++   ========================================================================== */
++(function () {
++  'use strict';
++  if (window.GeoTheme) return;
++  var THEMES = [{"id":"bor","name":"Бор","tag":"Тёмная лесная","desc":"Привычный тёмно-зелёный вид, но читаемый: лаймовые кнопки с тёмным текстом, светлые подписи, ровный шрифт Golos.","fontName":"Golos Text","scheme":"dark","pv":{"s_bg":"#0b1710","s_bg2":"#13261a","s_line":"#2f4a39","s_ink":"#eaf4ec","s_muted":"#a5beac","s_fill":"#a6e05a","head_bg":"#0b1710","head_ink":"#f3fbef","o_bg":"#0e1c14","o_line":"#33513f","o_ink":"#ecf5ee","o_muted":"#a8c1b0","fill":"#a6e05a","c_bg":"#122419","c_line":"#33513f","c_ink":"#e4efe6","c_on_bg":"#a6e05a","r":"10px","r_btn":"9px","r_c":"8px","font":"\"Golos Text\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"graphite","name":"Графит","tag":"Тёмная нейтральная, компактная","desc":"Серый «инженерный» интерфейс без цветового шума: янтарный акцент, плотная раскладка, моноширинные координаты.","fontName":"IBM Plex Sans","scheme":"dark","pv":{"s_bg":"#121416","s_bg2":"#1b1e21","s_line":"#353b42","s_ink":"#e8eaed","s_muted":"#a4aab2","s_fill":"#ffb547","head_bg":"#121416","head_ink":"#f4f5f7","o_bg":"#17191c","o_line":"#3d434b","o_ink":"#eceef1","o_muted":"#a9afb8","fill":"#ffb547","c_bg":"#1f2226","c_line":"#3d434b","c_ink":"#e6e8eb","c_on_bg":"#ffb547","r":"6px","r_btn":"5px","r_c":"4px","font":"\"IBM Plex Sans\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"white","name":"Белая карта","tag":"Светлая, спокойная","desc":"Светлые панели-карточки с мягкой тенью, тёмный текст, зелёный акцент с белым текстом на кнопках — максимум места карте.","fontName":"Inter","scheme":"light","pv":{"s_bg":"#ffffff","s_bg2":"#f3f6f4","s_line":"#dde4df","s_ink":"#15201a","s_muted":"#56635b","s_fill":"#147a3a","head_bg":"#0f2a1b","head_ink":"#ffffff","o_bg":"#ffffff","o_line":"#cfd8d2","o_ink":"#15201a","o_muted":"#56635b","fill":"#147a3a","c_bg":"#ffffff","c_line":"#cfd8d2","c_ink":"#24302a","c_on_bg":"#147a3a","r":"12px","r_btn":"10px","r_c":"8px","font":"\"Inter\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"navy","name":"Штаб","tag":"Тёмно-синяя, «пульт»","desc":"Тёмно-синий «диспетчерский» стиль: иконки в круглых плашках, кнопки-таблетки, голубой акцент с тёмным текстом.","fontName":"Roboto","scheme":"dark","pv":{"s_bg":"#0a1220","s_bg2":"#111c30","s_line":"#2a3c5c","s_ink":"#e7eef8","s_muted":"#a2b2c9","s_fill":"#5cc0ff","head_bg":"#0a1220","head_ink":"#eef4ff","o_bg":"#0e1726","o_line":"#34496d","o_ink":"#e9eff8","o_muted":"#a8b7cd","fill":"#5cc0ff","c_bg":"#142036","c_line":"#34496d","c_ink":"#dfe8f5","c_on_bg":"#5cc0ff","r":"14px","r_btn":"999px","r_c":"50%","font":"\"Roboto\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"gis","name":"ГИС-классика","tag":"Светло-серая, с подписями","desc":"Как в настольных ГИС: подписи под иконками панели инструментов, прямоугольные кнопки, синий акцент, плотные списки.","fontName":"Source Sans 3","scheme":"light","pv":{"s_bg":"#e6e9ed","s_bg2":"#ffffff","s_line":"#c4cbd3","s_ink":"#1b1f24","s_muted":"#4b5460","s_fill":"#0a59c2","head_bg":"#2c3e50","head_ink":"#ffffff","o_bg":"#ffffff","o_line":"#c4cbd3","o_ink":"#1b1f24","o_muted":"#4f5864","fill":"#0a59c2","c_bg":"#ffffff","c_line":"#b7c0ca","c_ink":"#2b3138","c_on_bg":"#0a59c2","r":"3px","r_btn":"3px","r_c":"2px","font":"\"Source Sans 3\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"contrast","name":"Высокий контраст","tag":"Чёрно-жёлтая, крупная","desc":"Для яркого солнца и слабого зрения: чёрный фон, белый текст, жёлтый акцент, рамки 2 px, крупные кнопки 48 px.","fontName":"Fira Sans","scheme":"dark","pv":{"s_bg":"#000000","s_bg2":"#0a0a0a","s_line":"#ffffff","s_ink":"#ffffff","s_muted":"#e0e0e0","s_fill":"#ffe600","head_bg":"#000000","head_ink":"#ffffff","o_bg":"#000000","o_line":"#ffffff","o_ink":"#ffffff","o_muted":"#e0e0e0","fill":"#ffe600","c_bg":"#000000","c_line":"#ffffff","c_ink":"#ffffff","c_on_bg":"#ffe600","r":"6px","r_btn":"6px","r_c":"4px","font":"\"Fira Sans\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"field","name":"Полевой планшет","tag":"Тёплая светлая, крупная","desc":"Для планшета в лесу: «бумажный» фон, тёмно-зелёная шапка, кнопки 52 px под палец, крупный шрифт PT Sans.","fontName":"PT Sans","scheme":"light","pv":{"s_bg":"#183626","s_bg2":"#1f4430","s_line":"#3d6650","s_ink":"#f7f1e3","s_muted":"#cbd8c6","s_fill":"#ffd27a","head_bg":"#183626","head_ink":"#fff7e6","o_bg":"#fffcf5","o_line":"#d3c6ab","o_ink":"#1e1a12","o_muted":"#5a5141","fill":"#1d6b30","c_bg":"#fffcf5","c_line":"#c9bb9c","c_ink":"#1e1a12","c_on_bg":"#1d6b30","r":"12px","r_btn":"10px","r_c":"10px","font":"\"PT Sans\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"swiss","name":"Швейцарский","tag":"Белый, строгий, без скруглений","desc":"Строгая типографика: белое поле, чёрные линии 1 px, прописные подписи, красный акцент, инверсия при наведении.","fontName":"Onest","scheme":"light","pv":{"s_bg":"#ffffff","s_bg2":"#ffffff","s_line":"#111111","s_ink":"#111111","s_muted":"#4a4a4a","s_fill":"#111111","head_bg":"#ffffff","head_ink":"#111111","o_bg":"#ffffff","o_line":"#111111","o_ink":"#111111","o_muted":"#4a4a4a","fill":"#111111","c_bg":"#ffffff","c_line":"#111111","c_ink":"#111111","c_on_bg":"#d7191c","r":"0px","r_btn":"0px","r_c":"0px","font":"\"Onest\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"taiga","name":"Тайга-сумерки","tag":"Тёмная бирюзовая, мягкая","desc":"Сумеречная тайга: глубокий сине-зелёный фон, бирюзовый акцент и коралловые метки, крупные скругления.","fontName":"Manrope","scheme":"dark","pv":{"s_bg":"#081517","s_bg2":"#0f2224","s_line":"#284a4e","s_ink":"#e3f2ef","s_muted":"#9ab8b3","s_fill":"#2ed3b7","head_bg":"#081517","head_ink":"#eafffb","o_bg":"#0b1b1d","o_line":"#30565a","o_ink":"#e6f4f2","o_muted":"#a1bfba","fill":"#2ed3b7","c_bg":"#112628","c_line":"#30565a","c_ink":"#dcefec","c_on_bg":"#2ed3b7","r":"14px","r_btn":"12px","r_c":"10px","font":"\"Manrope\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}},{"id":"gov","name":"Госстандарт","tag":"Светлая официальная","desc":"Официальный стиль: красно-зелёная полоса в шапке, белые панели, иконки в квадратных плашках, строгие скругления 4 px.","fontName":"Open Sans","scheme":"light","pv":{"s_bg":"#ffffff","s_bg2":"#f4f6f8","s_line":"#d5dbe2","s_ink":"#1a1d21","s_muted":"#4f5761","s_fill":"#1e6b3a","head_bg":"linear-gradient(180deg,#b3202a 0,#b3202a 66%,#1e6b3a 66%,#1e6b3a 100%)","head_ink":"#ffffff","o_bg":"#ffffff","o_line":"#ccd3db","o_ink":"#1a1d21","o_muted":"#4f5761","fill":"#1e6b3a","c_bg":"#ffffff","c_line":"#c3cbd4","c_ink":"#1a1d21","c_on_bg":"#1e6b3a","r":"4px","r_btn":"4px","r_c":"3px","font":"\"Open Sans\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}}];
++  var CLASSIC = {"name":"Как сейчас","tag":"Привычный вид без изменений","fontName":"Inter","desc":"Оформление Геосервиса по умолчанию: тема и сезон из настроек сайта. «Страж контраста» работает и здесь.","pv":{"s_bg":"#0f1f17","s_bg2":"#13281f","s_line":"#294331","s_ink":"#edf7ef","s_muted":"#b4c9be","s_fill":"#82e938","head_bg":"linear-gradient(180deg,#1d4a2b,#10291d)","head_ink":"#ffffff","o_bg":"#13281f","o_line":"#577568","o_ink":"#edf7ef","o_muted":"#b4c9be","fill":"#82e938","c_bg":"#13281f","c_line":"#294331","c_ink":"#82e938","c_on_bg":"#82e938","r":"10px","r_btn":"8px","r_c":"8px","font":"\"Inter\",\"Segoe UI\",system-ui,-apple-system,Arial,sans-serif"}};
++  var KEY = 'gt_theme', GKEY = 'gt_guard';
++  var d = document, H = d.documentElement, BOOT = window.GT_BOOT || {};
++  var BASE = BOOT.base || '/static/themes/', Q = BOOT.q || '';
++
++  function ls(k, v) {
++    try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); }
++    catch (e) { return null; }
++  }
++  function byId(id) { for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i]; return null; }
++  function cur() { return H.getAttribute('data-gt') || ''; }
++  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
++
++  /* ---------------- темы ---------------- */
++  function ensureFonts() {
++    if (d.getElementById('gt-fonts-css')) return;
++    var l = d.createElement('link'); l.rel = 'stylesheet'; l.id = 'gt-fonts-css'; l.href = BASE + 'gt-fonts.css' + Q;
++    (d.head || H).appendChild(l);
++  }
++  var seq = 0;
++  function apply(id, save) {
++    id = byId(id) ? id : '';
++    if (save) ls(KEY, id || 'classic');
++    var my = ++seq, old = d.getElementById('gt-theme-css'), nl = null;
++    function done() {
++      if (my !== seq) { if (nl && nl.parentNode) nl.parentNode.removeChild(nl); return; }
++      H.classList.add('gt-switching');
++      if (id) H.setAttribute('data-gt', id); else H.removeAttribute('data-gt');
++      var o = d.getElementById('gt-theme-css');
++      if (o && o !== nl && o.parentNode) o.parentNode.removeChild(o);
++      if (nl) nl.id = 'gt-theme-css';
++      setTimeout(function () { H.classList.remove('gt-switching'); }, 80);
++      Guard.reset(); Guard.schedule(300, true); Guard.schedule(1500, true);
++      syncCards();
++      try { window.dispatchEvent(new CustomEvent('gt-change', { detail: { theme: id || 'classic' } })); } catch (e) {}
++    }
++    if (!id) { done(); return; }
++    if (old && cur() === id) { done(); return; }
++    ensureFonts();
++    nl = d.createElement('link'); nl.rel = 'stylesheet'; nl.href = BASE + 'gt-' + id + '.css' + Q;
++    nl.onload = done; nl.onerror = done;
++    var anchor = old || d.getElementById('gt-core-css');
++    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(nl, anchor.nextSibling); else (d.head || H).appendChild(nl);
++  }
++
++  /* ---------------- окно «Оформление» ---------------- */
++  var ov = null, lastFocus = null;
++  function pvVars(p) {
++    var m = { sbg: p.s_bg, sbg2: p.s_bg2, sline: p.s_line, sink: p.s_ink, smut: p.s_muted, sfill: p.s_fill, head: p.head_bg, hink: p.head_ink,
++      obg: p.o_bg, oline: p.o_line, oink: p.o_ink, omut: p.o_muted, fill: p.fill, cbg: p.c_bg, cline: p.c_line, cink: p.c_ink, con: p.c_on_bg,
++      r: p.r, rb: p.r_btn, rc: p.r_c, font: p.font };
++    var s = ''; for (var k in m) s += '--p-' + k + ':' + m[k] + ';';
++    return s;
++  }
++  function card(t) {
++    var id = t ? t.id : 'classic', p = t ? t.pv : CLASSIC.pv, nm = t ? t.name : CLASSIC.name, tag = t ? t.tag : CLASSIC.tag,
++      fn = t ? t.fontName : CLASSIC.fontName, ds = t ? t.desc : CLASSIC.desc;
++    return '<button type="button" class="gt-card" data-gt-id="' + id + '" aria-pressed="false" style="' + esc(pvVars(p)) + '" title="' + esc(ds) + '">' +
++      '<span class="gt-pv" aria-hidden="true"><span class="gt-pv-s"><span class="gt-pv-h"><i></i><u></u></span><span class="gt-pv-q"></span>' +
++      '<span class="gt-pv-l"></span><span class="gt-pv-l m"></span><span class="gt-pv-l"></span><span class="gt-pv-l m"></span><span class="gt-pv-b"></span></span>' +
++      '<span class="gt-pv-p"><i></i><i class="m"></i><i class="m"></i><b></b></span><span class="gt-pv-c"><i class="on"></i><i></i><i></i><i></i></span>' +
++      '<span class="gt-pv-t" data-gt-keepfont>Аа 1:50 000</span></span>' +
++      '<span class="gt-nm"><b data-gt-keepfont style="font-family:' + esc(p.font) + '">' + esc(nm) + '</b><small>' + esc(tag) + '</small>' +
++      '<em>' + esc(fn) + ' · ' + esc(ds) + '</em></span></button>';
++  }
++  function build() {
++    ov = d.createElement('div'); ov.className = 'gt-ov'; ov.hidden = true; ov.setAttribute('data-gt-ui', '');
++    ov.innerHTML = '<div class="gt-dlg" role="dialog" aria-modal="true" aria-labelledby="gt-title" tabindex="-1">' +
++      '<div class="gt-hd"><div><h2 id="gt-title">Оформление</h2><p>Вид всего Геосервиса: цвета, шрифт, форма и размер кнопок. ' +
++      'Применяется сразу на всех открытых вкладках и запоминается в этом браузере. «Как сейчас» — прежний вид без изменений.</p></div>' +
++      '<button type="button" class="gt-x" data-gt-close aria-label="Закрыть">×</button></div>' +
++      '<div class="gt-grid">' + [card(null)].concat(THEMES.map(card)).join('') + '</div>' +
++      '<div class="gt-ft"><label class="gt-sw"><input type="checkbox" id="gt-guard-sw"><span><b>Страж контраста</b>' +
++      '<small>Следит, чтобы текст и значки читались в любой теме — и при наведении. Если цвета сливаются, подправляет их на лету.</small></span></label>' +
++      '<span class="gt-note">Alt+Shift+T — открыть это окно</span><button type="button" class="gt-ok" data-gt-close>Готово</button></div></div>';
++    d.body.appendChild(ov);
++    ov.addEventListener('click', function (e) {
++      var c = e.target.closest && e.target.closest('[data-gt-id]');
++      if (c) { var id = c.getAttribute('data-gt-id'); apply(id === 'classic' ? '' : id, true); return; }
++      if (e.target === ov || (e.target.closest && e.target.closest('[data-gt-close]'))) close();
++    });
++    ov.addEventListener('keydown', function (e) {
++      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
++      if (e.key === 'Tab') {
++        var f = ov.querySelectorAll('button,input'), a = f[0], z = f[f.length - 1];
++        if (e.shiftKey && d.activeElement === a) { e.preventDefault(); z.focus(); }
++        else if (!e.shiftKey && d.activeElement === z) { e.preventDefault(); a.focus(); }
++      }
++      if (/^Arrow/.test(e.key) && e.target.classList && e.target.classList.contains('gt-card')) {
++        var cs = Array.prototype.slice.call(ov.querySelectorAll('.gt-card')), i = cs.indexOf(e.target);
++        var cols = Math.max(1, Math.round(ov.querySelector('.gt-grid').clientWidth / (e.target.offsetWidth + 14)));
++        var j = i + ({ ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols })[e.key];
++        if (cs[j]) { e.preventDefault(); cs[j].focus(); }
++      }
++    });
++    var sw = ov.querySelector('#gt-guard-sw'); sw.checked = Guard.isOn();
++    sw.addEventListener('change', function () { Guard.enable(sw.checked, true); });
++  }
++  function syncCards() {
++    if (!ov) return;
++    var id = cur() || 'classic';
++    Array.prototype.forEach.call(ov.querySelectorAll('.gt-card'), function (c) { c.setAttribute('aria-pressed', c.getAttribute('data-gt-id') === id ? 'true' : 'false'); });
++    var sw = ov.querySelector('#gt-guard-sw'); if (sw) sw.checked = Guard.isOn();
++  }
++  function open() {
++    if (!d.body) return;
++    if (!ov) build();
++    ensureFonts(); syncCards();
++    lastFocus = d.activeElement;
++    ov.hidden = false;
++    var sel = ov.querySelector('.gt-card[aria-pressed="true"]') || ov.querySelector('.gt-card');
++    setTimeout(function () { try { sel.focus({ preventScroll: false }); } catch (e) {} }, 30);
++  }
++  function close() {
++    if (!ov || ov.hidden) return;
++    ov.hidden = true;
++    if (lastFocus && lastFocus.focus && d.contains(lastFocus)) { try { lastFocus.focus(); } catch (e) {} }
++    Guard.schedule(400, true);
++  }
++  function closeHostMenus() {
++    var m = d.getElementById('sf-profile-menu');
++    if (m && !m.hidden) {
++      var t = d.querySelector('[data-sf-profile-trigger][aria-expanded="true"]');
++      if (t) t.click(); else m.hidden = true;
++    }
++    if (typeof window.closeProfileMenu === 'function') { try { window.closeProfileMenu(); } catch (e) {} }
++  }
++  d.addEventListener('click', function (e) {
++    var a = e.target && e.target.closest && e.target.closest('[data-gt-open]');
++    if (!a) return;
++    e.preventDefault(); e.stopPropagation();
++    closeHostMenus(); open();
++  }, true);
++  d.addEventListener('keydown', function (e) {
++    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyT' || /^[tTеЕ]$/.test(e.key))) {
++      e.preventDefault(); if (ov && !ov.hidden) close(); else open();
++    }
++  });
++  window.addEventListener('storage', function (e) {
++    if (e.key === KEY) { var v = e.newValue || ''; apply(v === 'classic' ? '' : v, false); }
++    else if (e.key === GKEY) Guard.enable(e.newValue !== '0', false);
++  });
++
++  /* ---------------- «Страж контраста» ---------------- */
++  var Guard = (function () {
++    var on = ls(GKEY) !== '0';
++    var fixed = new Set(), orig = new WeakMap(), hov = new Map(), memo = new Map(), cache = new Map();
++    var phSheet = null, phN = 0, phRules = new Map();
++    var cx = null;
++    var RE_COL = /(rgba?\([^)]*\)|color\([^)]*\)|#[0-9a-fA-F]{3,8}\b|transparent)/g;
++    var SKIP_TAG = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, HEAD: 1, META: 1, LINK: 1, BR: 1, HR: 1, CANVAS: 1, IMG: 1, VIDEO: 1, AUDIO: 1, IFRAME: 1, OBJECT: 1, EMBED: 1, PICTURE: 1, SOURCE: 1, TRACK: 1, PARAM: 1, MAP: 1, AREA: 1, OPTION: 1, OPTGROUP: 1, DATALIST: 1 };
++    var EMO = /^[\s\p{Extended_Pictographic}\u200d\ufe0f\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}]+$/u;
++    var INTER = 'button,a[href],[role=button],[role=menuitem],[role=tab],[role=option],.tpm-item,.dialog-item,.lsr-item,label,summary,[onclick],[tabindex]:not([tabindex="-1"]),.sf-profile-menu-item,.mib-btn,.map-nav-btn';
++    function parse(s) {
++      if (!s || s === 'transparent' || s === 'none') return [0, 0, 0, 0];
++      var c = cache.get(s); if (c) return c;
++      var m = /^rgba?\(([^)]+)\)$/.exec(s), r;
++      if (m) {
++        var p = m[1].split(/[\s,\/]+/).filter(Boolean);
++        r = [+p[0], +p[1], +p[2], p.length > 3 ? (p[3].slice(-1) === '%' ? parseFloat(p[3]) / 100 : +p[3]) : 1];
++      } else if ((m = /^color\(srgb\s+([^)]+)\)$/.exec(s))) {
++        var q = m[1].split(/[\s\/]+/).filter(Boolean);
++        r = [q[0] * 255, q[1] * 255, q[2] * 255, q.length > 3 ? (q[3].slice(-1) === '%' ? parseFloat(q[3]) / 100 : +q[3]) : 1];
++      } else {
++        try {
++          if (!cx) { var cv = d.createElement('canvas'); cv.width = cv.height = 1; cx = cv.getContext('2d', { willReadFrequently: true }); }
++          cx.clearRect(0, 0, 1, 1); cx.fillStyle = 'rgba(0,0,0,0)'; cx.fillStyle = s; cx.fillRect(0, 0, 1, 1);
++          var px = cx.getImageData(0, 0, 1, 1).data; r = [px[0], px[1], px[2], px[3] / 255];
++        } catch (e) { r = [0, 0, 0, 0]; }
++      }
++      for (var i = 0; i < 4; i++) if (!isFinite(r[i])) r[i] = i === 3 ? 1 : 0;
++      if (cache.size > 800) cache.clear();
++      cache.set(s, r); return r;
++    }
++    function lin(v) { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
++    function lum(c) { return 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]); }
++    function cr(a, b) { var x = lum(a), y = lum(b); return x > y ? (x + 0.05) / (y + 0.05) : (y + 0.05) / (x + 0.05); }
++    function over(f, b) { var a = f[3]; return [f[0] * a + b[0] * (1 - a), f[1] * a + b[1] * (1 - a), f[2] * a + b[2] * (1 - a), 1]; }
++    function mix(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
++    function rgb(c) { return 'rgb(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ')'; }
++    function parentOf(n) { return n.parentElement || (n.parentNode && n.parentNode.host) || null; }
++    // Возможные цвета фона под содержимым элемента (градиенты — все опорные цвета); null — фон неизвестен (картинка, карта)
++    function cand(n) {
++      if (!n || n.nodeType !== 1) return [[255, 255, 255, 1]];
++      if (memo.has(n)) return memo.get(n);
++      var res;
++      if (n.id === 'map' || (n.classList && (n.classList.contains('ol-viewport') || n.classList.contains('ol-layer'))) || SKIP_TAG[n.tagName] === 1 && n.tagName !== 'OPTION') {
++        res = n.tagName === 'HTML' ? [[255, 255, 255, 1]] : null;
++        memo.set(n, res); return res;
++      }
++      var cs = getComputedStyle(n), bc = parse(cs.backgroundColor), bi = cs.backgroundImage, stops = null;
++      if (bi && bi !== 'none') {
++        if (bi.indexOf('url(') >= 0 || bi.indexOf('image-set') >= 0) { memo.set(n, null); return null; }
++        var mm = bi.match(RE_COL); if (mm) stops = mm.map(parse);
++      }
++      var base;
++      if (bc[3] >= 0.995) base = [bc];
++      else {
++        var stopsOpaque = stops && stops.length && stops.every(function (s) { return s[3] >= 0.995; });
++        if (stopsOpaque) base = [[255, 255, 255, 1]];
++        else {
++          var below = n.tagName === 'HTML' ? [[255, 255, 255, 1]] : cand(parentOf(n));
++          if (below === null) { memo.set(n, null); return null; }
++          base = bc[3] > 0.005 ? below.map(function (b) { return over(bc, b); }) : below;
++        }
++      }
++      if (stops && stops.length) {
++        var out = [], seen = {};
++        for (var i = 0; i < base.length; i++) for (var j = 0; j < stops.length; j++) {
++          var c = over(stops[j], base[i]), k = Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]);
++          if (!seen[k]) { seen[k] = 1; out.push(c); }
++        }
++        if (out.length > 16) { out.sort(function (a, b) { return lum(a) - lum(b); }); out = [out[0], out[out.length >> 1], out[out.length - 1]]; }
++        base = out;
++      }
++      memo.set(n, base); return base;
++    }
++    function hasText(el) {
++      for (var c = el.firstChild; c; c = c.nextSibling) if (c.nodeType === 3 && /\S/.test(c.nodeValue)) return true;
++      return false;
++    }
++    function visible(el) {
++      if (el.checkVisibility) {
++        try { if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true, opacityProperty: true, visibilityProperty: true })) return false; } catch (e) {}
++      }
++      var r = el.getClientRects(); if (!r.length) return false;
++      var b = r[0]; return b.width > 0.5 && b.height > 0.5;
++    }
++    function disabled(el) {
++      try { if (el.matches(':disabled')) return true; } catch (e) {}
++      return !!(el.closest && el.closest('[aria-disabled="true"],[disabled],[inert]'));
++    }
++    function opac(el) {   // прозрачность самого элемента и прозрачных (без фона) предков
++      var o = 1, n = el, k = 0;
++      while (n && n.nodeType === 1 && k++ < 40) {
++        var cs = getComputedStyle(n); o *= parseFloat(cs.opacity);
++        if (n !== el && (parse(cs.backgroundColor)[3] > 0.005 || cs.backgroundImage !== 'none')) break;
++        n = parentOf(n);
++      }
++      return o;
++    }
++    function groupOpac(el) { var o = 1, n = el, k = 0; while (n && n.nodeType === 1 && k++ < 60) { o *= parseFloat(getComputedStyle(n).opacity); n = parentOf(n); } return o; }
++    function worst(fg, cands) { var m = 99; for (var i = 0; i < cands.length; i++) { var r = cr(over(fg, cands[i]), cands[i]); if (r < m) m = r; } return m; }
++    function solve(fg, a, cands, th) {
++      var best = null, T = [[0, 0, 0], [255, 255, 255]];
++      for (var t = 0; t < 2; t++) {
++        var tg = T[t], ext = worst([tg[0], tg[1], tg[2], a], cands);
++        if (ext < th) { if (!best || (!best.ok && ext > best.r)) best = { c: tg, ok: false, r: ext }; continue; }
++        var lo = 0, hi = 1;
++        for (var k = 0; k < 14; k++) { var mid = (lo + hi) / 2, c = mix(fg, tg, mid); if (worst([c[0], c[1], c[2], a], cands) >= th) hi = mid; else lo = mid; }
++        var cc = mix(fg, tg, hi);
++        if (!best || !best.ok || hi < best.t) best = { c: cc, ok: true, t: hi, r: worst([cc[0], cc[1], cc[2], a], cands) };
++      }
++      return best;
++    }
++    function remember(el, props, store) {
++      for (var i = 0; i < props.length; i++) {
++        var p = props[i];
++        if (store) { store.push({ el: el, p: p, v: el.style.getPropertyValue(p), pr: el.style.getPropertyPriority(p) }); continue; }
++        var o = orig.get(el); if (!o) { o = {}; orig.set(el, o); }
++        if (!(p in o)) o[p] = { v: el.style.getPropertyValue(p), pr: el.style.getPropertyPriority(p) };
++      }
++      if (!store) fixed.add(el);
++    }
++    function setProps(el, props, val, store) {
++      remember(el, props, store);
++      for (var i = 0; i < props.length; i++) el.style.setProperty(props[i], val, 'important');
++    }
++    function phFix(el, val) {
++      if (!phSheet) { var st = d.createElement('style'); st.id = 'gt-guard-ph'; (d.head || H).appendChild(st); phSheet = st; }
++      var k = el.getAttribute('data-gtg-ph'); if (!k) { k = String(++phN); el.setAttribute('data-gtg-ph', k); }
++      phRules.set(k, '[data-gtg-ph="' + k + '"]::placeholder{color:' + val + '!important;opacity:1!important}');
++      var s = ''; phRules.forEach(function (v) { s += v + '\n'; }); phSheet.textContent = s;
++    }
++    function label(el) {
++      var s = el.tagName.toLowerCase() + (el.id ? '#' + el.id : '');
++      if (el.classList && el.classList.length) s += '.' + Array.prototype.slice.call(el.classList, 0, 3).join('.');
++      return s;
++    }
++    // Проверка одного элемента. rep — отчёт; fix — исправлять; store — массив для отката (наведение/фокус)
++    function check(el, rep, fix, store) {
++      if (!el || el.nodeType !== 1 || SKIP_TAG[el.tagName] === 1) return;
++      if (el.closest('.gt-pv,[data-gt-skip],.ol-viewport canvas')) return;
++      var tag = el.tagName, isSvg = tag === 'svg' || tag === 'SVG', kind = null;
++      if (isSvg) {
++        if (el.parentElement && el.parentElement.closest('svg')) return;
++        if (!(el.classList.contains('tb-svg') || /currentcolor/i.test(el.getAttribute('stroke') || '') || /currentcolor/i.test(el.getAttribute('fill') || ''))) return;
++        kind = 'icon';
++      } else if (el instanceof SVGElement) return;
++      else if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
++        var ty = (el.type || '').toLowerCase();
++        if (/^(checkbox|radio|range|color|file|hidden|image|submit|reset|button)$/.test(ty)) { if (!/^(submit|reset|button)$/.test(ty) || !el.value) return; kind = 'text'; }
++        else kind = (el.value || tag === 'SELECT') ? 'text' : (el.placeholder ? 'ph' : null);
++        if (!kind) return;
++      } else if (tag === 'I' && !el.querySelector('svg') && /(^|\s)(fa|fa-[a-z-]+|ti|ti-[a-z-]+|future-icon)(\s|$)/.test(el.className)) kind = 'icon';
++      else if (hasText(el)) {
++        kind = 'text';
++        // цветные эмодзи не зависят от color — не проверяем
++        if (EMO.test(el.textContent || '')) return;
++      }
++      else return;
++      if (!visible(el) || disabled(el)) return;
++      if (groupOpac(el) < 0.6) return;
++      var cs = getComputedStyle(el);
++      if (cs.webkitBackgroundClip === 'text' || cs.backgroundClip === 'text') return;
++      var fgS = cs.color, props = ['color'];
++      if (kind === 'ph') { try { fgS = getComputedStyle(el, '::placeholder').color; } catch (e) {} }
++      else if (isSvg) {
++        var st = cs.stroke, fl = cs.fill;
++        if (st && st !== 'none' && !/url\(/.test(st)) { fgS = st; if (parse(st).join() !== parse(cs.color).join()) props = ['color', 'stroke']; }
++        else if (fl && fl !== 'none' && !/url\(/.test(fl)) { fgS = fl; if (parse(fl).join() !== parse(cs.color).join()) props = ['color', 'fill']; }
++      } else {
++        var tf = cs.webkitTextFillColor;
++        if (tf && tf !== fgS && parse(tf)[3] > 0) { fgS = tf; props = ['color', '-webkit-text-fill-color']; }
++      }
++      var fg = parse(fgS); if (fg[3] < 0.04) return;
++      var cands = cand(el); if (!cands) return;
++      var op = opac(el), a = fg[3] * op;
++      var fs = parseFloat(cs.fontSize) || 14, fw = parseInt(cs.fontWeight, 10) || 400;
++      var th = kind === 'icon' ? 3 : ((fs >= 24 || (fs >= 18.66 && fw >= 700)) ? 3 : 4.5);
++      var r = worst([fg[0], fg[1], fg[2], a], cands);
++      rep.checked++;
++      if (r >= th) return;
++      var item = { el: label(el), text: (kind === 'icon' ? '[значок]' : kind === 'ph' ? '[подсказка] ' + (el.placeholder || '') : (el.value || el.textContent || '')).replace(/\s+/g, ' ').trim().slice(0, 48),
++        kind: kind, ratio: Math.round(r * 100) / 100, need: th, fg: rgb(fg), bg: rgb(cands[0]) };
++      if (fix) {
++        var s = solve(fg, Math.max(op, 0.0001) >= 1 ? 1 : op, cands, th + 0.2);
++        if (s) {
++          var v = rgb(s.c);
++          if (kind === 'ph') phFix(el, v); else setProps(el, props, v, store);
++          item.fixed = v; item.after = Math.round(s.r * 100) / 100; rep.fixed++;
++        }
++      }
++      rep.fails.push(item);
++    }
++    function list(root) {
++      var out = [];
++      if (!root) return out;
++      if (root.nodeType === 1) out.push(root);
++      var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
++      for (var i = 0; i < all.length; i++) { var t = all[i].tagName; if (SKIP_TAG[t] !== 1 && !(all[i] instanceof SVGElement && t !== 'svg')) out.push(all[i]); }
++      return out;
++    }
++    function newRep() { return { checked: 0, fixed: 0, fails: [], theme: cur() || 'classic', guard: on }; }
++    function audit(o) {
++      o = o || {}; memo.clear();
++      var rep = newRep(), els = list(o.root || d.body), fix = o.fix === true || (o.fix !== false && on);
++      for (var i = 0; i < els.length; i++) { try { check(els[i], rep, fix, null); } catch (e) {} }
++      memo.clear(); return rep;
++    }
++    /* фоновая проверка порциями */
++    var queue = [], qset = new Set(), busy = false, timers = [], last = null;
++    function enqueue(root) {
++      if (!root || qset.has(root)) return;
++      qset.add(root); queue.push(root);
++    }
++    function pump() {
++      if (busy) return; busy = true;
++      var rep = newRep(), els = [];
++      while (queue.length) els = els.concat(list(queue.shift()));
++      qset.clear(); memo.clear();
++      var i = 0;
++      (function slice() {
++        var t0 = performance.now();
++        while (i < els.length && performance.now() - t0 < 12) { try { check(els[i++], rep, true, null); } catch (e) {} }
++        if (i < els.length) { setTimeout(slice, 16); return; }
++        memo.clear(); busy = false; last = rep;
++        if (queue.length) setTimeout(pump, 50);
++      })();
++    }
++    function schedule(ms, full) {
++      if (!on) return;
++      timers.push(setTimeout(function () { if (full) enqueue(d.body); pump(); }, ms || 0));
++    }
++    function reset() {
++      fixed.forEach(function (el) {
++        var o = orig.get(el); if (!o) return;
++        for (var p in o) { if (o[p].v) el.style.setProperty(p, o[p].v, o[p].pr); else el.style.removeProperty(p); }
++        orig.delete(el);
++      });
++      fixed.clear();
++      hov.forEach(function (st) { restore(st); }); hov.clear();
++      phRules.clear(); if (phSheet) phSheet.textContent = '';
++      cache.clear();
++    }
++    function restore(st) {
++      for (var i = st.length - 1; i >= 0; i--) { var x = st[i]; if (x.v) x.el.style.setProperty(x.p, x.v, x.pr); else x.el.style.removeProperty(x.p); }
++      st.length = 0;
++    }
++    /* наведение и фокус */
++    function interRoot(t) { return t && t.closest ? t.closest(INTER) : null; }
++    function hoverCheck(root) {
++      if (!on || !root.isConnected) return;
++      if (!(root.matches(':hover') || root.matches(':focus-within') || root.matches(':focus'))) return;
++      var st = hov.get(root); if (!st) { st = []; hov.set(root, st); }
++      memo.clear();
++      var rep = newRep(), els = list(root);
++      if (els.length > 60) els = els.slice(0, 60);
++      for (var i = 0; i < els.length; i++) { try { check(els[i], rep, true, st); } catch (e) {} }
++      memo.clear();
++    }
++    function leave(root) {
++      setTimeout(function () {
++        if (!root.isConnected || root.matches(':hover') || root.matches(':focus-within')) return;
++        var st = hov.get(root); if (st) { restore(st); hov.delete(root); }
++        setTimeout(function () { if (on && root.isConnected && !root.matches(':hover')) { enqueue(root); pump(); } }, 260);
++      }, 30);
++    }
++    function onEnter(e) {
++      if (!on) return;
++      var r = interRoot(e.target); if (!r || (e.relatedTarget && r.contains(e.relatedTarget))) return;
++      setTimeout(function () { hoverCheck(r); }, 120);
++      setTimeout(function () { hoverCheck(r); }, 380);
++    }
++    function onLeave(e) {
++      var r = interRoot(e.target); if (!r || (e.relatedTarget && r.contains(e.relatedTarget))) return;
++      if (hov.has(r)) leave(r);
++    }
++    d.addEventListener('pointerover', onEnter, true);
++    d.addEventListener('pointerout', onLeave, true);
++    d.addEventListener('focusin', onEnter, true);
++    d.addEventListener('focusout', onLeave, true);
++    var lastClick = 0;
++    d.addEventListener('click', function () {
++      if (!on) return; var n = Date.now(); if (n - lastClick < 1500) return; lastClick = n;
++      schedule(450, true);
++    }, true);
++    var mo = null, mtimer = 0, mroots = [];
++    function observe() {
++      if (mo || !window.MutationObserver || !d.body) return;
++      mo = new MutationObserver(function (ms) {
++        if (!on) return;
++        for (var i = 0; i < ms.length && mroots.length < 60; i++) {
++          var m = ms[i];
++          if (m.type === 'childList') { for (var j = 0; j < m.addedNodes.length; j++) if (m.addedNodes[j].nodeType === 1) mroots.push(m.addedNodes[j]); else if (m.addedNodes[j].nodeType === 3 && m.target.nodeType === 1) mroots.push(m.target); }
++          else if (m.target.nodeType === 1 && m.target.id !== 'gt-guard-ph') mroots.push(m.target);
++        }
++        clearTimeout(mtimer);
++        mtimer = setTimeout(function () {
++          var rs = mroots; mroots = [];
++          if (rs.length >= 60) { enqueue(d.body); pump(); return; }
++          rs.forEach(function (r) { if (r.isConnected && !(r.closest && r.closest('.gt-pv'))) enqueue(r); });
++          pump();
++        }, 700);
++      });
++      mo.observe(d.body, { childList: true, subtree: true, characterData: false, attributes: true, attributeFilter: ['class', 'hidden', 'open', 'aria-expanded', 'aria-selected', 'aria-pressed', 'data-theme', 'data-gs-theme'] });
++    }
++    function enable(v, save) {
++      on = !!v; if (save) ls(GKEY, on ? '1' : '0');
++      if (!on) reset(); else { schedule(50, true); }
++      if (ov) { var sw = ov.querySelector('#gt-guard-sw'); if (sw) sw.checked = on; }
++    }
++    function start() {
++      observe();
++      schedule(1000, true); schedule(3200, true);
++    }
++    return { audit: audit, schedule: schedule, reset: reset, enable: enable, isOn: function () { return on; }, start: start, last: function () { return last; },
++      _cr: cr, _parse: parse };
++  })();
++
++  window.GeoTheme = {
++    version: '20.9',
++    list: function () { return THEMES.map(function (t) { return { id: t.id, name: t.name, tag: t.tag }; }); },
++    get: cur,
++    set: function (id) { apply(id === 'classic' ? '' : id, true); },
++    open: open, close: close,
++    audit: function (o) { return Guard.audit(o); },
++    guard: { enable: function (v) { Guard.enable(v, true); }, isOn: Guard.isOn, reset: Guard.reset, last: Guard.last }
++  };
++  // тема из другой вкладки/параметра могла смениться до загрузки скрипта
++  (function () {
++    var want = ls(KEY) || ''; if (want === 'classic') want = '';
++    if (byId(want) && want !== cur()) apply(want, false);
++  })();
++  if (d.readyState === 'complete') Guard.start();
++  else window.addEventListener('load', function () { Guard.start(); });
++})();

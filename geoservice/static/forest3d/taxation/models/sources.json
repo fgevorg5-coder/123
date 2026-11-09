@@ -1,0 +1,119 @@
+[
+  {
+    "file": "pine.glb",
+    "title": "Mature Scots pine (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-scots-pine-mature-818bd1b5",
+    "download": "https://cdn.3dassets.dev/assets/3805/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 100780,
+    "sha256": "28d56d114e15987850c0d6cd263744dcdfac130a46f488f6c49d0bd47bf1548f"
+  },
+  {
+    "file": "spruce.glb",
+    "title": "Mature Norway spruce (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-norway-spruce-mature-770657d8",
+    "download": "https://cdn.3dassets.dev/assets/3801/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 36636,
+    "sha256": "dab5b6e98b501ddfacdd788c81ae026f1ece163542b88d2a5c57cc52dff43889"
+  },
+  {
+    "file": "birch.glb",
+    "title": "Mature silver birch (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-silver-birch-mature-c3711d50",
+    "download": "https://cdn.3dassets.dev/assets/3790/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 96568,
+    "sha256": "366b0e8d617f2b54cc05d89e8fa230971532c4dbbfb48a9d226435a8af9b0f4d"
+  },
+  {
+    "file": "aspen_group.glb",
+    "title": "Aspen clone group (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-aspen-clone-group-62fe8c4a",
+    "download": "https://cdn.3dassets.dev/assets/3795/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 86500,
+    "sha256": "84247294fb76a4341e47ccc3c6f67ac4a953699143b515274ab5a96d7f8dd2b0"
+  },
+  {
+    "file": "alder.glb",
+    "title": "Mature common alder (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-common-alder-mature-9ee793ad",
+    "download": "https://cdn.3dassets.dev/assets/3789/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 186504,
+    "sha256": "077ad216e0f9c7388adef0fd4c6c2bceb8035b8a4a1e1ca1992ddc52aa7e9551"
+  },
+  {
+    "file": "oak.glb",
+    "title": "Mature English oak (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-english-oak-mature-ac520af6",
+    "download": "https://cdn.3dassets.dev/assets/3776/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 106980,
+    "sha256": "400c85eca089ea0fda9d974219332efc70e02f5543d51fe40c77859307190825"
+  },
+  {
+    "file": "hornbeam.glb",
+    "title": "Mature hornbeam (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-hornbeam-mature-6e37a40c",
+    "download": "https://cdn.3dassets.dev/assets/3788/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 147732,
+    "sha256": "4bc3207e2bc93a27de6089dc42e5b686173fe778318c9c85d926b134d9836566"
+  },
+  {
+    "file": "ash.glb",
+    "title": "Mature common ash (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-common-ash-mature-0ef032d4",
+    "download": "https://cdn.3dassets.dev/assets/3786/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 99756,
+    "sha256": "f9124945d88a244c889ca1b3328d5b38b816c276d60ead079289ebf6d8194f30"
+  },
+  {
+    "file": "maple.glb",
+    "title": "Mature field maple (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-field-maple-mature-40b99530",
+    "download": "https://cdn.3dassets.dev/assets/3780/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 107004,
+    "sha256": "d0ce91e1ae1b319979c1fd56dcd01ec2f4a8aae149c666a8edb05e5c831129e6"
+  },
+  {
+    "file": "linden.glb",
+    "title": "Small-leaved lime with basal shoots (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-small-leaved-lime-7d20650f",
+    "download": "https://cdn.3dassets.dev/assets/3787/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 197024,
+    "sha256": "fff94a2eae34c003e1f993483340fccf3b76ec39dbfd04f7ec84e5be71cd38d2"
+  },
+  {
+    "file": "willow.glb",
+    "title": "Mature white willow (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-white-willow-mature-7dfd213b",
+    "download": "https://cdn.3dassets.dev/assets/3792/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 110540,
+    "sha256": "f93908417ca4d5df65aa32a8c7286a5ef0e57241b69627842acc2a3ddbd1cd83"
+  },
+  {
+    "file": "larch.glb",
+    "title": "Mature European larch (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-european-larch-mature-5f8af7ce",
+    "download": "https://cdn.3dassets.dev/assets/3803/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 20148,
+    "sha256": "09d983b791cb1f4ccc94dfb391f204bee6f66e805ce8a160da4bb33381cf82e9"
+  },
+  {
+    "file": "apple.glb",
+    "title": "Gnarled crab apple (Forest Trees and Woodland Plants)",
+    "source": "https://3dassets.dev/assets/temperate-forest-ecology-crab-apple-gnarled-a6575a1d",
+    "download": "https://cdn.3dassets.dev/assets/3782/v1/model.glb",
+    "license": "CC0 1.0 Universal",
+    "bytes": 99300,
+    "sha256": "289a90482ca850cd9d5c8271e3cce86cea61597f9913ee689deb1b423271aa32"
+  }
+]

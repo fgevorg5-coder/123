@@ -1,0 +1,31 @@
+/* avatar-sync.css — Геосервис v20.9: аватар пользователя вне «Сообщений» выглядит так же, как в них:
+   круг цвета профиля с буквой, фото поверх, «лесная» рамка (/static/frames/*.svg) и эмодзи статуса. */
+html[lang] .gav, html[lang] body .sidebar .sf-profile-trigger .sf-avatar.gav{
+  position:relative!important;border-radius:50%!important;border:0!important;overflow:visible!important;isolation:isolate;
+  display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 auto;
+  font:700 calc(var(--gav-size,34px) * .42)/1 var(--gs-font,Inter,system-ui,sans-serif)!important;letter-spacing:0!important;
+  width:var(--gav-size,34px)!important;height:var(--gav-size,34px)!important;min-width:var(--gav-size,34px)!important;
+  box-shadow:none!important;user-select:none;cursor:inherit;
+  transition:transform .15s ease!important;
+}
+html[lang] .gav:hover{transform:none}
+html[lang] .gav>.gav-l{position:relative;z-index:0;pointer-events:none}
+html[lang] .gav>.gav-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;z-index:0;pointer-events:none}
+html[lang] .gav.gav-photo>.gav-l{visibility:hidden}
+html[lang] .gav.gav-framed::after{content:"";position:absolute;inset:-12.5%;z-index:1;pointer-events:none;background:center/100% 100% no-repeat}
+html[lang] .gav-fr-pine::after{background-image:url("/static/frames/pine.svg?v=18.1")}
+html[lang] .gav-fr-birch::after{background-image:url("/static/frames/birch.svg?v=18.1")}
+html[lang] .gav-fr-oak::after{background-image:url("/static/frames/oak.svg?v=18.1")}
+html[lang] .gav-fr-fern::after{background-image:url("/static/frames/fern.svg?v=18.1")}
+html[lang] .gav-fr-moss::after{background-image:url("/static/frames/moss.svg?v=18.1")}
+html[lang] .gav-fr-autumn::after{background-image:url("/static/frames/autumn.svg?v=18.1")}
+html[lang] .gav-fr-frost::after{background-image:url("/static/frames/frost.svg?v=18.1")}
+html[lang] .gav-fr-sunrise::after{background-image:url("/static/frames/sunrise.svg?v=18.1")}
+html[lang] .gav-fr-mushroom::after{background-image:url("/static/frames/mushroom.svg?v=18.1")}
+html[lang] .gav-fr-night::after{background-image:url("/static/frames/night.svg?v=18.1")}
+html[lang] .gav-fr-spruce::after{background-image:url("/static/frames/spruce.svg?v=18.1")}
+html[lang] .gav>.gav-emo{position:absolute;right:-10%;bottom:-10%;z-index:2;width:46%;height:46%;display:grid;place-items:center;border-radius:50%;
+  line-height:1;font-size:calc(var(--gav-size,34px) * .3);background:var(--gav-emo-bg,#fff);box-shadow:0 0 0 2px var(--gav-emo-ring,rgba(0,0,0,.18));pointer-events:none}
+html[lang] body .sidebar .sf-profile-trigger .sf-avatar.gav{--gav-emo-bg:var(--gs-card,#13281f);--gav-emo-ring:var(--gs-bg,#0b1914)}
+html[lang] body .sidebar .sf-profile-trigger .sf-avatar.gav.gav-framed{margin:3px}
+html[lang] body .sidebar .sf-profile-trigger:hover .sf-avatar.gav{filter:brightness(1.06)}

@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="ru" data-ui="v17" data-season="{{ season|default('', true) }}">
+<head>
+    <meta charset="UTF-8">
+    <!-- [H] Content-Security-Policy -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'; style-src 'self' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://unpkg.com https://cdn.jsdelivr.net 'unsafe-inline'; font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src 'self' https: data: blob:; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; worker-src 'self' blob:; media-src 'self' blob: data:;">
+    <!-- [I] Referrer Policy -->
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <!-- [C] CSRF-токен из сессии Django/FastAPI — читается JS перед мутирующими запросами -->
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <!-- [FIX] версия для панелей, которые грузятся по клику (panel-crs.js и др.):
+         без неё был всегда ?v=1 → Service Worker вечно отдавал старый файл -->
+    <script>window._staticVer = '{{ version }}-v19';</script>
+    <meta name="admin-rendered" content="{{ 1 if is_admin else 0 }}">
+    <script defer src="/static/admin_guard.js?v={{ version }}"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Геосервис ОДЗиМЛ</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="shortcut icon" type="image/x-icon" href="/favicon.ico">
+    
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+
+    <!-- [v18 PERF] Убран preload ol.js / proj4.js: preload поднимал им приоритет до «высокого», и 260 КБ
+         скриптов карты загружались раньше CSS и картинки первого экрана. Скрипты (defer, внизу страницы)
+         браузер всё равно находит сразу — сканер предзагрузки видит их в HTML; карта стартует,
+         как и раньше, после map-core.js. -->
+    <!-- [v18 PERF] Убраны Leaflet, Leaflet.VectorGrid, Leaflet-Geoman (+CSS), Leaflet.GeometryUtil и Turf:
+         карта целиком на OpenLayers, ни один скрипт портала их не вызывает (~350 КБ JS, 5 запросов).
+         Убрана и предзагрузка шрифтов Font Awesome: иконки рисует Tabler (icons-tabler.js),
+         а шрифт FA браузер скачает сам, только если на экране окажется незаменённая иконка. -->
+    <!-- [v18 PERF] Шрифт интерфейса Inter — все 4 начертания, чтобы не ждать CSS-бандла (цепочка запросов) -->
+    <link rel="preload" href="/static/fonts/inter-400.woff2?v=4.1" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/inter-500.woff2?v=4.1" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/inter-600.woff2?v=4.1" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/inter-700.woff2?v=4.1" as="font" type="font/woff2" crossorigin>
+
+    <!-- [v18 PERF] Маленькие синхронные скрипты встроены в HTML (раньше — 4 блокирующих запроса).
+         Порядок прежний: настройки UI → индикатор связи (перехват fetch) → сезон сцены → тема.
+         Стоят ДО стилей, поэтому выполняются сразу, не дожидаясь загрузки CSS. -->
+    {{ inline_js('ui-prefs.js') }}
+    {{ inline_js('net-status.js') }}
+    {{ inline_js('scene-season.js') }}
+    {{ inline_js('design-system-v15.js') }}
+
+    <!-- [PERF] Font Awesome — иконки не в критическом пути первого рендера.
+         [v18 PERF] Подключается сразу ПОСЛЕ первой отрисовки (раньше — preload с наивысшим приоритетом:
+         CSS 19 КБ + шрифт 150 КБ делили канал с основным CSS и картинкой первого экрана).
+         Почти все иконки рисует Tabler (icons-tabler.js); место в каскаде прежнее — перед бандлом. -->
+    <script>
+    (function () {
+        var here = document.currentScript, done = false;
+        function add(href, sri) {
+            var l = document.createElement('link');
+            l.rel = 'stylesheet'; l.href = href; l.crossOrigin = 'anonymous'; l.referrerPolicy = 'no-referrer';
+            if (sri) {
+                l.integrity = sri;
+                l.onerror = function () { l.onerror = null; add('https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css'); };
+            }
+            here.parentNode.insertBefore(l, here);
+        }
+        function go() {
+            if (done) return; done = true;
+            add('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css',
+                'sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw==');
+        }
+        requestAnimationFrame(function () { setTimeout(go, 0); });
+        setTimeout(go, 3000);   // вкладка открыта в фоне — rAF не вызывается
+    })();
+    </script>
+    <noscript>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+              integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw=="
+              crossorigin="anonymous" referrerpolicy="no-referrer">
+    </noscript>
+
+    <!-- [v18 PERF] ВСЕ стили страницы — один файл (static_assets.py склеивает их в прежнем порядке:
+         style.css, ui-custom.css, бывшие <style> из head и body, voice-assistant, net-status, ui-enhance,
+         sidebar_profile_menu, design-system v15–v18, icons-tabler, unified-search, map-icon-style,
+         measurement-ui, tool-panels-ui, geoservice-help). Раньше 17 запросов, часть — в конце <body>
+         (из-за этого боковая панель «прыгала» после первой отрисовки, CLS). -->
+    {{ css_bundle('index') }}
+    <link rel="stylesheet" href="/static/avatar-sync.css?v={{ version }}">
+    <style id="bgl-emblem-css">
+/* [v21] Значок «Белгослес»: один встроенный SVG, без смешивания слоёв и CSS-фильтров (старый значок из 12 слоёв с mix-blend-mode пересчитывался поверх анимированной сцены) */
+html[lang] .sidebar .fh-emblem.fh-emblem--v21{width:auto!important;height:auto!important;min-width:0!important;min-height:0!important;padding:0!important;margin:0!important;border:0!important;border-radius:0!important;background:none!important;box-shadow:none!important;filter:none!important;animation:none!important;transform:none!important;opacity:1!important;display:flex!important;align-items:center;justify-content:center;flex:0 0 auto!important;overflow:visible!important;position:relative;z-index:2}
+html[lang] .sidebar .fh-emblem.fh-emblem--v21::before,html[lang] .sidebar .fh-emblem.fh-emblem--v21::after{content:none!important;display:none!important}
+html[lang] .sidebar .fh-emblem.fh-emblem--v21>:not(.bgl-emblem){display:none!important}
+.bgl-emblem{position:relative;display:block;width:74px;aspect-ratio:128/76;height:auto;flex:0 0 auto;cursor:default;transition:transform .25s ease;-webkit-tap-highlight-color:transparent}
+.bgl-emblem__svg{position:absolute;inset:0;width:100%;height:100%;display:block;overflow:visible}
+.bgl-emblem__sheen{position:absolute;inset:0;overflow:hidden;pointer-events:none;-webkit-mask:url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20128%2076'%3E%3Cpath%20d='M34%202.5H94Q97.5%2014.5%20108%2026.5H100Q104.5%2038.25%20116%2050H106Q111.5%2061.75%20124%2073.5H4Q16.5%2061.75%2022%2050H12Q23.5%2038.25%2028%2026.5H20Q30.5%2014.5%2034%202.5Z'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20128%2076'%3E%3Cpath%20d='M34%202.5H94Q97.5%2014.5%20108%2026.5H100Q104.5%2038.25%20116%2050H106Q111.5%2061.75%20124%2073.5H4Q16.5%2061.75%2022%2050H12Q23.5%2038.25%2028%2026.5H20Q30.5%2014.5%2034%202.5Z'/%3E%3C/svg%3E") center/contain no-repeat}
+.bgl-emblem__sheen i{position:absolute;top:-12%;bottom:-12%;left:0;width:34%;background:linear-gradient(90deg,rgba(255,246,210,0) 0%,rgba(255,250,228,.5) 50%,rgba(255,246,210,0) 100%);transform:translateX(-140%) skewX(-20deg);animation:bgl-v21-sheen 12s ease-in-out 4s infinite}
+@keyframes bgl-v21-sheen{0%,84%{transform:translateX(-140%) skewX(-20deg)}97%,100%{transform:translateX(330%) skewX(-20deg)}}
+.bgl-emblem:hover{transform:translateY(-1px)}
+.bgl-emblem:hover .bgl-emblem__sheen i{animation:bgl-v21-sheen-h 1s ease-out 1}
+@keyframes bgl-v21-sheen-h{from{transform:translateX(-140%) skewX(-20deg)}to{transform:translateX(330%) skewX(-20deg)}}
+@media (max-width:768px){.bgl-emblem{width:64px}}
+html[data-gs-motion=off] .bgl-emblem__sheen i{animation:none!important;opacity:0}
+@media (prefers-reduced-motion:reduce){.bgl-emblem__sheen i{animation:none!important;opacity:0}.bgl-emblem{transition:none}}
+    </style>
+
+<script defer src="/static/sidebar_profile_menu.js?v=profile-polished-v2"></script>
+<!-- [v17] Линейные иконки Tabler (MIT) вместо Material «B» -->
+<script defer src="/static/icons-tabler.js?v=v17"></script>
+<script defer src="/static/brand-logo.js?v=independent-v15"></script>
+<!-- [v20.9] Модули оформления: тема до первой отрисовки + окно «Оформление» (Alt+Shift+T) и «Страж контраста» -->
+<script src="/static/themes/gt-boot.js?v={{ version }}"></script>
+</head>
+<body>
+
+
+
+    <!-- PROFILE MODAL -->
+    <div id="profileModal">
+        <div class="profile-modal-box">
+            <h3><i class="fa-solid fa-id-card" style="color:#82e938"></i> Заполните анкету</h3>
+            <p>Укажите ваше имя и организацию. Администратор рассмотрит заявку и откроет расширенный доступ к геопорталу.</p>
+            <div id="profileFormArea">
+                <input class="profile-input" id="profileName" type="text" placeholder="Ваше имя / ФИО">
+                <input class="profile-input" id="profileOrg" type="text" placeholder="Организация">
+                <button class="profile-submit" onclick="submitProfile()">
+                    <i class="fa-solid fa-paper-plane"></i> Отправить заявку
+                </button>
+                <span class="profile-skip" onclick="document.getElementById('profileModal').classList.remove('show')">
+                    Пропустить — остаться гостем
+                </span>
+            </div>
+            <div class="profile-success" id="profileSuccess" style="display:none">
+                <i class="fa-solid fa-check-circle"></i>
+                <p>Заявка отправлена! Ожидайте одобрения администратора.</p>
+            </div>
+        </div>
+    </div>
+
+
+    <input type="file" id="leskhozShpInput" accept=".zip" style="display:none">
+
+    <div id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Обработка данных...</div>
+    </div>
+
+    <main class="app-container" aria-label="Картографическое приложение">
+        <div class="sidebar">
+            <div class="sidebar-header gs-forest-brand">
+                <div class="forest-header" aria-label="Лесная сцена: деревья и спутник ДЗЗ">
+                    <div class="fh-bg"></div><div class="fh-grid"></div>
+                    <canvas id="fh-scene-canvas" aria-hidden="true"></canvas>
+                    <div class="fh-inner">
+                        <div class="fh-emblem fh-emblem--v21"><span id="fh-coin" hidden aria-hidden="true"></span><span class="bgl-emblem" role="img" aria-label="Белгослес" title="Белгослес"><svg class="bgl-emblem__svg" viewBox="0 0 128 76" aria-hidden="true" focusable="false"><defs><path id="bglv21-s" d="M34 2.5H94Q97.5 14.5 108 26.5H100Q104.5 38.25 116 50H106Q111.5 61.75 124 73.5H4Q16.5 61.75 22 50H12Q23.5 38.25 28 26.5H20Q30.5 14.5 34 2.5Z"/><path id="bglv21-t" d="M46.91 23.4V10.6H55.32V12.75H49.53V15.83H52.26Q54.19 15.83 55.32 16.78Q56.44 17.72 56.44 19.48Q56.44 21.28 55.32 22.34Q54.19 23.4 52.26 23.4ZM49.53 21.33H51.88Q52.83 21.33 53.37 20.84Q53.92 20.35 53.92 19.5Q53.92 18.71 53.37 18.23Q52.83 17.75 51.88 17.75H49.53ZM58.91 23.4V10.6H67.48V12.77H61.53V15.87H67.03V18.01H61.53V21.23H67.49V23.4ZM69.7 23.4V21.23H70.04Q70.68 21.23 71.04 20.89Q71.39 20.55 71.58 19.71Q71.76 18.88 71.88 17.39L72.44 10.6H81.09V23.4H78.46V12.77H74.81L74.36 18.21Q74.18 20.23 73.67 21.36Q73.17 22.49 72.29 22.94Q71.42 23.4 70.1 23.4Z M54.65 31.9V34.07H48.82V44.7H46.2V31.9ZM62.13 44.88Q60.44 44.88 59.08 44.1Q57.73 43.33 56.94 41.86Q56.16 40.39 56.16 38.31Q56.16 36.22 56.94 34.75Q57.73 33.27 59.08 32.5Q60.44 31.73 62.13 31.73Q63.83 31.73 65.18 32.5Q66.53 33.27 67.32 34.75Q68.1 36.22 68.1 38.31Q68.1 40.4 67.32 41.86Q66.53 43.33 65.18 44.1Q63.83 44.88 62.13 44.88ZM62.13 42.55Q63.63 42.55 64.53 41.46Q65.44 40.37 65.44 38.31Q65.44 36.24 64.53 35.15Q63.63 34.06 62.13 34.06Q60.64 34.06 59.73 35.15Q58.82 36.25 58.82 38.31Q58.82 40.36 59.73 41.46Q60.64 42.55 62.13 42.55ZM76.28 44.88Q74.57 44.88 73.23 44.1Q71.89 43.33 71.11 41.86Q70.34 40.39 70.34 38.31Q70.34 36.22 71.12 34.75Q71.9 33.27 73.25 32.5Q74.6 31.73 76.28 31.73Q77.73 31.73 78.91 32.27Q80.09 32.8 80.85 33.82Q81.6 34.84 81.79 36.27H79.14Q78.95 35.23 78.19 34.65Q77.43 34.06 76.33 34.06Q74.84 34.06 73.92 35.17Q73 36.27 73 38.31Q73 40.39 73.92 41.47Q74.85 42.55 76.32 42.55Q77.42 42.55 78.19 41.96Q78.95 41.37 79.14 40.32H81.8Q81.65 41.52 80.96 42.55Q80.26 43.59 79.08 44.23Q77.9 44.88 76.28 44.88Z M45.63 66.2V64.03H45.97Q46.61 64.03 46.97 63.69Q47.32 63.35 47.51 62.51Q47.69 61.68 47.81 60.19L48.37 53.4H57.02V66.2H54.39V55.57H50.74L50.29 61.01Q50.11 63.03 49.6 64.16Q49.1 65.29 48.22 65.74Q47.35 66.2 46.03 66.2ZM59.95 66.2V53.4H68.52V55.57H62.57V58.67H68.07V60.81H62.57V64.03H68.54V66.2ZM76.85 66.38Q75.14 66.38 73.8 65.6Q72.46 64.83 71.68 63.36Q70.91 61.89 70.91 59.81Q70.91 57.72 71.69 56.25Q72.47 54.78 73.82 54Q75.17 53.23 76.85 53.23Q78.31 53.23 79.48 53.77Q80.66 54.3 81.42 55.32Q82.17 56.34 82.36 57.77H79.71Q79.53 56.73 78.77 56.15Q78.01 55.56 76.91 55.56Q75.41 55.56 74.49 56.67Q73.57 57.77 73.57 59.81Q73.57 61.89 74.49 62.97Q75.42 64.05 76.9 64.05Q77.99 64.05 78.76 63.46Q79.53 62.87 79.72 61.82H82.37Q82.22 63.02 81.53 64.05Q80.83 65.09 79.65 65.73Q78.47 66.38 76.85 66.38Z"/><clipPath id="bglv21-c"><use href="#bglv21-s"/></clipPath><linearGradient id="bglv21-g" x1="0" y1="0" x2=".32" y2="1"><stop offset="0" stop-color="#fff4c4"/><stop offset=".2" stop-color="#f3d36e"/><stop offset=".45" stop-color="#c8962e"/><stop offset=".6" stop-color="#946419"/><stop offset=".8" stop-color="#e4bf5c"/><stop offset="1" stop-color="#7c5210"/></linearGradient><linearGradient id="bglv21-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fffbe6" stop-opacity=".95"/><stop offset=".55" stop-color="#fff3c0" stop-opacity=".25"/><stop offset="1" stop-color="#fff3c0" stop-opacity="0"/></linearGradient><radialGradient id="bglv21-e" cx="42%" cy="24%" r="82%"><stop offset="0" stop-color="#43b45c"/><stop offset=".42" stop-color="#1f7d38"/><stop offset=".78" stop-color="#0f5425"/><stop offset="1" stop-color="#083b18"/></radialGradient><linearGradient id="bglv21-l" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fffbe2"/><stop offset=".34" stop-color="#f7dc82"/><stop offset=".68" stop-color="#d9a842"/><stop offset="1" stop-color="#a7721d"/></linearGradient><linearGradient id="bglv21-h" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity=".42"/><stop offset="1" stop-color="#000" stop-opacity="0"/></linearGradient><filter id="bglv21-b1" x="-10%" y="-15%" width="120%" height="140%"><feGaussianBlur stdDeviation="1.3"/></filter><filter id="bglv21-b2" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="1.8"/></filter></defs><use href="#bglv21-s" transform="translate(0 2)" fill="#000" opacity=".5" filter="url(#bglv21-b1)"/><use href="#bglv21-s" fill="none" stroke="#140d02" stroke-opacity=".8" stroke-width="1.8" stroke-linejoin="miter"/><use href="#bglv21-s" fill="url(#bglv21-g)"/><g clip-path="url(#bglv21-c)"><use href="#bglv21-s" fill="url(#bglv21-e)"/><rect x="0" y="26.5" width="128" height="3.4" fill="url(#bglv21-h)"/><rect x="0" y="50" width="128" height="3.4" fill="url(#bglv21-h)"/><ellipse cx="58" cy="-6" rx="74" ry="24" fill="#fff" opacity=".09"/><use href="#bglv21-s" fill="none" stroke="#000" stroke-opacity=".55" stroke-width="13" stroke-linejoin="miter" filter="url(#bglv21-b2)"/><use href="#bglv21-s" fill="none" stroke="#0b2a12" stroke-width="10.6" stroke-linejoin="miter"/><use href="#bglv21-s" fill="none" stroke="url(#bglv21-g)" stroke-width="9" stroke-linejoin="miter"/><use href="#bglv21-s" fill="none" stroke="url(#bglv21-r)" stroke-width="1.7" stroke-linejoin="miter"/></g><use href="#bglv21-t" transform="translate(0 1.25)" fill="#021a08" opacity=".9"/><use href="#bglv21-t" transform="translate(0 -.55)" fill="#fff7d6" opacity=".55"/><use href="#bglv21-t" fill="url(#bglv21-l)"/></svg><span class="bgl-emblem__sheen" aria-hidden="true"><i></i></span></span></div>
+                        <div class="fh-texts"><div class="fh-title">ОДЗиМЛ</div><div class="fh-subtitle">Геосервис отдела</div></div>
+                    </div>
+                </div>
+            </div>
+            <!-- [v21] сцена шапки рисуется в отдельном потоке (Worker + OffscreenCanvas) — не замирает и не дёргается при зуме карты -->
+            <script defer src="/static/header-scene.js?v=v21"></script>
+
+            <!-- ══ ПОИСК ЛЕСХОЗОВ ══ -->
+            <div id="sidebar-search-wrap">
+                <div id="sidebar-search-inner">
+                    <span id="sbs-icon"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg></span>
+                    <input type="text" id="lsp-search-input" placeholder="Объект, слой, снимок…" aria-label="Поиск по всем слоям">
+                    <button id="lsp-search-clear" title="Очистить" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
+                    <button id="lsp-voice-btn" type="button" title="Голосовой помощник (Alt+M)" aria-label="Голосовой помощник"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg></button>
+                    <button id="lsp-settings-toggle" title="Фильтры"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h6m4 0h8M3 12h12m4 0h2M3 18h2m4 0h12"/><circle cx="11" cy="6" r="2"/><circle cx="17" cy="12" r="2"/><circle cx="7" cy="18" r="2"/></svg></button>
+                </div>
+                <div id="lsp-results-container"></div>
+            </div>
+
+            <div id="tree-container" class="forest-scrollbar"></div>
+
+            <div class="sidebar-footer">
+
+                <!-- ══ НОВОСТИ belgosles.by (парсится скриптом в app.py, пока сервер активен) ══ -->
+                {# [v18 PERF] Первая новость рисуется сервером (из кэша новостей, без запросов к сайту):
+                   её картинка — самый крупный элемент первого экрана (LCP), и браузер теперь находит её
+                   сразу в HTML, а не после /api/news и скрипта. Нет кэша — панель, как раньше, заполнит JS. #}
+                {% set nf = news_first %}
+                <div id="sf-news-panel" class="sf-news-panel"{% if not nf %} style="display:none;"{% endif %}>
+                    <div class="sf-news-head">
+                        <i class="fa-solid fa-newspaper"></i><span>Новости предприятия "Белгослес"</span>
+                    </div>
+                    <a href="{{ nf.url if nf else '#' }}" id="sf-news-card" class="sf-news-card" target="_blank" rel="noopener">
+                        <div class="sf-news-img-wrap">
+                            <img id="sf-news-img" alt="{{ nf.title if nf else '' }}" width="388" height="218" decoding="async"{% if nf and nf.image %} src="{{ nf.image }}" fetchpriority="high"{% endif %}>
+                        </div>
+                        <div class="sf-news-body">
+                            <span id="sf-news-date" class="sf-news-date">{{ nf.date if nf else '' }}</span>
+                            <span id="sf-news-title" class="sf-news-title">{{ nf.title if nf else '' }}</span>
+                        </div>
+                    </a>
+                    <div id="sf-news-dots" class="sf-news-dots">{% if nf and nf.count > 1 %}{% for i in range(nf.count) %}<span{% if loop.first %} class="active"{% endif %}></span>{% endfor %}{% endif %}</div>
+                </div>
+<!-- [v18 PERF] стили перенесены в static/index-sidebar.css (бандл index) -->
+                <script>
+                (function(){
+                    var panel = document.getElementById('sf-news-panel');
+                    var card  = document.getElementById('sf-news-card');
+                    var img   = document.getElementById('sf-news-img');
+                    var dateEl= document.getElementById('sf-news-date');
+                    var titleEl=document.getElementById('sf-news-title');
+                    var dotsEl= document.getElementById('sf-news-dots');
+                    var items = [];
+                    var idx = 0;
+                    var rotateTimer = null;
+
+                    function render(i){
+                        if (!items.length) return;
+                        idx = ((i % items.length) + items.length) % items.length;
+                        var it = items[idx];
+                        if (img.getAttribute('src') === (it.image || '')) {
+                            // [v18 PERF] картинка уже на месте (первая новость нарисована сервером) — без мигания
+                            img.alt = it.title || '';
+                        } else {
+                            img.style.opacity = 0;
+                            setTimeout(function(){
+                                img.src = it.image || '';
+                                img.alt = it.title || '';
+                                img.style.opacity = 1;
+                            }, 120);
+                        }
+                        dateEl.textContent = it.date || '';
+                        titleEl.textContent = it.title || '';
+                        card.href = it.url || '#';
+                        Array.prototype.forEach.call(dotsEl.children, function(dot, di){
+                            dot.classList.toggle('active', di === idx);
+                        });
+                    }
+
+                    function buildDots(){
+                        dotsEl.innerHTML = '';
+                        items.slice(0, 6).forEach(function(_, i){
+                            var dot = document.createElement('span');
+                            dot.addEventListener('click', function(){ render(i); resetTimer(); });
+                            dotsEl.appendChild(dot);
+                        });
+                    }
+
+                    function resetTimer(){
+                        if (rotateTimer) clearInterval(rotateTimer);
+                        if (items.length > 1) {
+                            rotateTimer = setInterval(function(){ render(idx + 1); }, 7000);
+                        }
+                    }
+
+                    function loadNews(){
+                        fetch('/api/news?page=1')
+                            .then(function(r){ return r.json(); })
+                            .then(function(data){
+                                if (data && data.ok && data.items && data.items.length){
+                                    items = data.items.slice(0, 6);
+                                    panel.style.display = 'block';
+                                    buildDots();
+                                    render(0);
+                                    resetTimer();
+                                } else {
+                                    panel.style.display = 'none';
+                                }
+                            })
+                            .catch(function(){ panel.style.display = 'none'; });
+                    }
+
+                    // [UI] Новости можно выключить в Настройках — тогда не делаем
+                    // ни первого запроса, ни периодических обновлений.
+                    var newsTimer = null;
+                    function newsEnabled(){
+                        return !window.UIPrefs || window.UIPrefs.newsEnabled();
+                    }
+                    function startNews(){
+                        if (!newsEnabled()) {
+                            if (newsTimer) { clearInterval(newsTimer); newsTimer = null; }
+                            if (rotateTimer) { clearInterval(rotateTimer); rotateTimer = null; }
+                            return;
+                        }
+                        loadNews();
+                        if (!newsTimer) {
+                            // Периодически подтягиваем свежие новости, пока страница открыта.
+                            newsTimer = setInterval(loadNews, 15 * 60 * 1000);
+                        }
+                    }
+                    startNews();
+                    window.addEventListener('ui-prefs-change', startNews);
+                })();
+                </script>
+
+                <!-- ══ БЕГУЩАЯ СТРОКА: ПРЕИМУЩЕСТВА ГЕОПОРТАЛА ══ -->
+                <div class="sf-marquee-wrap" id="sfMarquee">
+                    <div class="sf-marquee-track">
+                        <span class="sf-marquee-item"><i class="fa-solid fa-map-location-dot"></i>Интерактивная карта 106 лесхозов Беларуси</span>
+                        <span class="sf-marquee-item"><i class="fa-solid fa-cloud-sun"></i>Погода в реальном времени по каждому лесхозу</span>
+                        <span class="sf-marquee-item"><i class="fa-solid fa-layer-group"></i>Поддержка растровых слоёв MBTiles</span>
+                        <span class="sf-marquee-item"><i class="fa-solid fa-gauge-high"></i>Быстрая и стабильная работа карты</span>
+                        <span class="sf-marquee-item"><i class="fa-solid fa-sliders"></i>Гибкая настройка слоёв и прозрачности</span>
+                        <span class="sf-marquee-item"><i class="fa-solid fa-magnifying-glass-location"></i>Мгновенный поиск лесхозов и населённых пунктов</span>
+                        <span class="sf-marquee-item"><i class="fa-solid fa-envelope"></i>Встроенные сообщения и уведомления</span>
+                        <span class="sf-marquee-item"><i class="fa-solid fa-shield-halved"></i>Защищённый доступ и учёт пользователей</span>
+                        <!-- дубликат для бесшовной прокрутки -->
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-map-location-dot"></i>Интерактивная карта 106 лесхозов Беларуси</span>
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-cloud-sun"></i>Погода в реальном времени по каждому лесхозу</span>
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-layer-group"></i>Поддержка растровых слоёв MBTiles</span>
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-gauge-high"></i>Быстрая и стабильная работа карты</span>
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-sliders"></i>Гибкая настройка слоёв и прозрачности</span>
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-magnifying-glass-location"></i>Мгновенный поиск лесхозов и населённых пунктов</span>
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-envelope"></i>Встроенные сообщения и уведомления</span>
+                        <span class="sf-marquee-item" aria-hidden="true"><i class="fa-solid fa-shield-halved"></i>Защищённый доступ и учёт пользователей</span>
+                    </div>
+                </div>
+
+                {% if is_admin %}
+                <!-- ── АДМИНИСТРАТОР ── -->
+                <button type="button" class="sf-user-row sf-profile-trigger sf-admin-row" data-sf-profile-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="sf-profile-menu" title="Профиль и общие инструменты">
+                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar" data-me-avatar data-me-ip="{{ user_ip }}" data-me-name="Администратор" data-me-org="" aria-hidden="true">А</span><span class="sf-user-text"><span class="sf-username">Администратор</span></span></span>
+                    <span class="sf-profile-unread" data-sf-unread-summary hidden aria-live="polite"></span>
+                    <span class="sf-profile-chevron"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 14 4-4 4 4"/></svg></span>
+                </button>
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                    <a href="/admin/users" target="_blank" class="btn-forest btn-full" style="background:#1a3d1a;color:#82e938;border:1px solid rgba(130,233,56,0.35);font-size:14px;flex:1;text-align:center;min-height:44px;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 6px;text-decoration:none;border-radius:8px;font-weight:700;">
+                        <i class="fa-solid fa-users-gear"></i> Пользователи
+                    </a>
+                    <a href="/logout" class="btn-forest btn-earth-red" style="flex:1;text-align:center;min-height:44px;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 6px;text-decoration:none;border-radius:8px;font-weight:700;font-size:14px;">
+                        <i class="fa-solid fa-right-from-bracket"></i> Выход
+                    </a>
+                </div>
+
+                {% elif is_registered %}
+                <!-- ── ЗАРЕГИСТРИРОВАННЫЙ ПОЛЬЗОВАТЕЛЬ ── -->
+                <button type="button" class="sf-user-row sf-profile-trigger" data-sf-profile-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="sf-profile-menu" title="Профиль и общие инструменты">
+                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar" data-me-avatar data-me-ip="{{ user_ip }}" data-me-name="{{ user_name or 'Пользователь' }}" data-me-org="{{ profile_org or '' }}" aria-hidden="true">{{ (user_name or "Пользователь")[0]|upper }}</span><span class="sf-user-text"><span class="sf-username">{{ user_name or "Пользователь" }}</span>{% if organization_name %}<span class="sf-department" title="{{ organization_name }}">{{ organization_name }}</span>{% endif %}</span></span>
+                    <span class="sf-profile-unread" data-sf-unread-summary hidden aria-live="polite"></span>
+                    <span class="sf-profile-chevron"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 14 4-4 4 4"/></svg></span>
+                </button>
+
+                {% else %}
+                <!-- ── ГОСТЬ / АВТО-ОПРЕДЕЛЕНИЕ ПО IP ── -->
+                {# [v18 PERF] Профиль по IP известен серверу уже при отрисовке: сразу показываем нужный блок
+                   (раньше гостевой блок исчезал после /api/session/me — панель «прыгала», CLS). #}
+                <div id="sf-guest-block"{% if has_profile %} style="display:none;"{% endif %}>
+                    <div class="sf-guest-row">
+                        <i class="fa-solid fa-user-secret sf-guest-icon"></i>
+                        <span class="sf-guest-text">Вы вошли как <strong>Гость</strong></span>
+                    </div>
+                    <button id="sidebarProfileBtn" class="btn-forest btn-full" style="background:#82e938;color:#0d1a10;margin-top:8px;" onclick="openProfileModal()">
+                        <i class="fa-solid fa-id-card"></i> Заполнить анкету
+                    </button>
+                    <a href="/login" class="btn-forest btn-full" style="background:white;color:#152918;margin-top:6px;display:block;text-align:center;text-decoration:none;padding:9px;border-radius:8px;font-weight:700;font-size:13px;">
+                        <i class="fa-solid fa-lock"></i> Вход (Для админа)
+                    </a>
+                </div>
+                <!-- Блок зарегистрированного пользователя — показывается JS если IP найден -->
+                <div id="sf-registered-block"{% if not has_profile %} style="display:none;"{% endif %}>
+                    <button type="button" class="sf-user-row sf-profile-trigger" data-sf-profile-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="sf-profile-menu" title="Профиль и общие инструменты">
+                    <span class="sf-user-info"><span class="sf-avatar" id="sf-avatar-ip" data-me-avatar data-me-ip="{{ user_ip }}" data-me-name="{{ profile_name or profile_org or 'Пользователь' }}" data-me-org="{{ profile_org or '' }}" aria-hidden="true">{{ (profile_name or profile_org or "Пользователь")[0]|upper }}</span><span class="sf-user-text"><span class="sf-username"><span id="sf-reg-name">{{ profile_name or profile_org }}</span></span><span class="sf-department" id="sf-reg-dept"{% if not profile_org %} style="display:none;"{% endif %}>{{ profile_org }}</span></span></span>
+                    <span class="sf-profile-unread" data-sf-unread-summary hidden aria-live="polite"></span>
+                    <span class="sf-profile-chevron"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 14 4-4 4 4"/></svg></span>
+                </button>
+                </div>
+                <script>
+                (function() {
+                    fetch('/api/session/me')
+                        .then(function(r) { return r.ok ? r.json() : null; })
+                        .then(function(data) {
+                            if (!data || !data.has_profile) return;
+                            // Если сервер вернул is_admin — перезагружаем страницу,
+                            // чтобы Jinja2 отрендерил полный блок администратора
+                            // [FIX v4.2] не более одной перезагрузки за 2 минуты — раньше при
+                            // расхождении шаблона и /api/session/me страница перезагружалась по кругу
+                            if (data.is_admin) {
+                                var last = 0;
+                                try { last = +sessionStorage.getItem('adm_reload_at') || 0; } catch (_) {}
+                                if (Date.now() - last > 120000) {
+                                    try { sessionStorage.setItem('adm_reload_at', String(Date.now())); } catch (_) {}
+                                    window.location.reload();
+                                    return;
+                                }
+                            }
+                            var guestBlock = document.getElementById('sf-guest-block');
+                            var regBlock   = document.getElementById('sf-registered-block');
+                            var nameEl     = document.getElementById('sf-reg-name');
+                            if (guestBlock) guestBlock.style.display = 'none';
+                            if (regBlock)   regBlock.style.display   = '';
+                            if (nameEl)     nameEl.textContent = data.display_name || data.user_name || "Пользователь";
+                            var deptEl = document.getElementById('sf-reg-dept');
+                            if (deptEl && data.organization_name) { deptEl.textContent = data.organization_name; deptEl.style.display = ''; }
+                            // [G] Не пишем в window.HAS_PROFILE — UI уже обновляется через DOM ниже
+                            var banner = document.getElementById('guestBanner');
+                            if (banner) banner.classList.remove('show');
+                        })
+                        .catch(function() {});
+                })();
+                </script>
+                {% endif %}
+
+<nav id="sf-profile-menu" class="sf-profile-menu" role="menu" aria-label="Профиль и общие инструменты" hidden>
+<div class="sf-profile-menu-heading">Общее</div>
+<a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/messages?openProfile=1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3"/><path d="M5 21v-2a7 7 0 0 1 10-6"/><circle cx="18" cy="17" r="2.5"/><path d="M18 13v1.5m0 5V21m-4-4h1.5m5 0H22"/></svg><span>Настройки профиля</span></a>
+<a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="#appearance" data-gt-open title="Цвета, шрифт и кнопки (Alt+Shift+T)"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 1 9-9c0 1.9-1.4 3-3.1 3H16a2 2 0 0 0-1.5 3.3A1.7 1.7 0 0 1 12 21z"/><circle cx="7.5" cy="11" r="1.1"/><circle cx="10.5" cy="7" r="1.1"/><circle cx="15.5" cy="7.5" r="1.1"/></svg><span>Оформление</span></a>
+<div class="sf-profile-menu-divider" role="separator"></div>
+<a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/messages?openTaxatorQueue=1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6M6 17H3V9h18v8h-3"/><path d="M6 14h12v7H6zM17 11h1"/></svg><span>Таксаторы печать</span></a>
+<a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/messages?openVacancy=1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H5v20h14V7zM14 2v5h5M8 12h8M8 16h6"/></svg><span>Заявление за свой счёт</span></a>
+<a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/messages?openCalendar=1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18M8 15h.01M12 15h.01M16 15h.01M8 18h.01M12 18h.01"/></svg><span>Календарь ОДЗиМЛ</span></a>
+<a class="sf-profile-menu-item" role="menuitem" tabindex="-1" href="/manuals"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5C8 3 5 3 2 4v16c4-1 7-1 10 1 3-2 6-2 10-1V4c-3-1-6-1-10 1zm0 0v16"/></svg><span>Методички</span></a>
+<a href="/messages" class="sf-profile-menu-item sf-envelope-wrap" role="menuitem" tabindex="-1" id="sf-envelope-link"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 6 9 7 9-7"/></svg><span>Мессенджер</span><span id="sf-envelope-icon" hidden></span><span class="sf-badge" id="sf-inbox-badge" style="display:none;"></span></a>
+{% if not is_admin %}<div class="sf-profile-menu-divider" role="separator"></div><a class="sf-profile-menu-item sf-profile-login" href="/login" role="menuitem" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span>Вход для администратора</span></a>{% endif %}
+</nav>
+            </div>
+
+
+            <!-- [v20.9] Аватар — один на все страницы: фото, рамка и эмодзи статуса из «Сообщений»
+                 (static/avatar-sync.js). Старый эмодзи-пикер (🌲, sf_user_avatar_v2) удалён: при выборе эмодзи он
+                 удалял фото профиля. sfOpenPicker() теперь открывает «Мой профиль → Рамка» в «Сообщениях». -->
+            {{ inline_js('avatar-sync.js') }}
+
+            <script>
+            // ── ВХОДЯЩИЕ ──────────────────────────────────────────
+            // [PERF] Lighthouse: «Avoid chaining critical requests»
+            // Первый вызов inbox_count теперь делается внутри initSession (параллельно с /me).
+            // Здесь запускаем только периодический поллинг, и только ПОСЛЕ load-события —
+            // чтобы не добавлять запрос в критический путь LCP.
+            (function(){
+                var link = document.getElementById('sf-envelope-link');
+                if (!link) return;
+                function updateInbox(){
+                    fetch('/api/messages/inbox_count')
+                        .then(function(r){return r.json();})
+                        .then(function(d){
+                            var badge = document.getElementById('sf-inbox-badge');
+                            var icon  = document.getElementById('sf-envelope-icon');
+                            if (!badge||!icon) return;
+                            var cnt = d.count||0;
+                            if (cnt>0){
+                                badge.textContent = cnt>99?'99+':String(cnt);
+                                badge.style.display = 'flex';
+                                link.classList.add('has-mail');
+                                icon.className = 'fa-solid fa-envelope';
+                                icon.style.color = '#e74c3c';
+                            } else {
+                                badge.style.display = 'none';
+                                link.classList.remove('has-mail');
+                                icon.className = 'fa-regular fa-envelope';
+                                icon.style.color = '';
+                            }
+                        }).catch(function(){});
+                }
+                // [PERF] Откладываем первый поллинг до полной загрузки страницы,
+                // затем каждые 15 сек. Не блокируем критический путь рендера.
+                window.addEventListener('load', function() {
+                    setTimeout(function() {
+                        updateInbox();
+                        setInterval(updateInbox, 15000);
+                    }, 2000); // 2-сек пауза после load даём браузеру отрисовать LCP
+                });
+            })();
+            </script>
+
+        </div>
+
+        <div id="map"></div>
+    </main>
+
+    <a href="/api/download_catalog" id="downloadBtn" class="floating-download-btn" title="Скачать каталог для ArcMap (Alt+O)">
+        <i class="fa-solid fa-layer-group"></i> Скачать Каталог (SHP)
+    </a>
+
+    <div id="uploadModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle"><i class="fa-solid fa-cloud-arrow-up"></i> Загрузка снимков</h3>
+                <span class="close upload-close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <form id="uploadForm" enctype="multipart/form-data">
+                    <input type="hidden" id="selectedLeskhozId" name="leskhoz_id">
+
+                    <div class="form-group">
+                        <label style="font-size: 16px; font-weight: bold; margin-bottom: 10px; display: block;">Режим загрузки:</label>
+                        <div class="switch-mode-container" style="display: flex; gap: 20px; margin-bottom: 15px;">
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                                <input type="radio" name="uploadMode" value="files" checked onchange="toggleUploadMode()">
+                                <span><i class="fa-regular fa-file"></i> Файлы</span>
+                            </label>
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                                <input type="radio" name="uploadMode" value="folder" onchange="toggleUploadMode()">
+                                <span><i class="fa-regular fa-folder-open"></i> Папка</span>
+                            </label>
+                        </div>
+
+                        <div id="filesBlock">
+                            <input type="file" id="inputFiles" accept=".tif,.tiff,.geotiff,.png,.jpg,.jpeg,.img" multiple class="custom-file-input">
+                        </div>
+
+                        <div id="folderBlock" style="display: none;">
+                            <input type="file" id="inputFolder" accept=".tif,.tiff,.geotiff,.png,.jpg,.jpeg,.img" webkitdirectory multiple class="custom-folder-input">
+                            <small style="color: #666; display:block; margin-top:5px;"><i class="fa-solid fa-circle-info"></i> Будут загружены все снимки из папки.</small>
+                        </div>
+
+                        <div class="form-group" style="margin-top: 15px; padding: 10px; background: #fff3cd; border: 1px solid #ffeeba; border-radius: 5px;">
+                            <label style="cursor: pointer; display: flex; align-items: flex-start; gap: 10px; margin: 0; color: #856404;">
+                                <input type="checkbox" id="skipTfwCheckbox" style="margin-top: 5px;">
+                                <div>
+                                    <span style="font-weight: bold;"><i class="fa-solid fa-link-slash"></i> Загружать без .tfw</span>
+                                    <small style="display: block; color: #856404; font-size: 12px; margin-top: 2px;">
+                                        Не запрашивать файл привязки (игнорировать координаты)
+                                    </small>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div style="margin: 20px 0; border-bottom: 1px solid #eee;"></div>
+
+                    <div class="form-group">
+                        <label><i class="fa-solid fa-satellite" aria-hidden="true"></i> Тип съёмки:</label>
+                        <select name="survey_type" class="custom-select">
+                            <option value="uav" selected>БПЛА (Дрон)</option>
+                            <option value="aerophoto">Аэрофото (Самолет)</option>
+                            <option value="space">Космос (Спутник)</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group half"><label><i class="fa-solid fa-calendar-days" aria-hidden="true"></i> Дата съёмки:</label><input type="date" name="date_shot" required></div>
+                        <div class="form-group half"><label><i class="fa-solid fa-helicopter" aria-hidden="true"></i> Оборудование:</label><input type="text" name="equipment" placeholder="DJI Mavic 3E" required></div>
+                    </div>
+                    <div class="form-group"><label><i class="fa-solid fa-file-lines" aria-hidden="true"></i> № Договора:</label><input type="text" name="contract" placeholder="Например: 123-А" required></div>
+                    <div class="form-group"><label><i class="fa-solid fa-building" aria-hidden="true"></i> Организация:</label><input type="text" name="organization" placeholder="Например: БелЛесАвиа" required></div>
+
+                    <button type="submit" class="btn-forest btn-download btn-full" style="margin-top: 20px;"><i class="fa-solid fa-play"></i> Начать загрузку</button>
+                </form>
+                <div id="uploadStatus" class="status-message" style="margin-top: 15px; max-height: 100px; overflow-y: auto;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(to right, #d3860d, #f39c12);">
+                <h3><i class="fa-solid fa-pen-to-square"></i> Редактирование</h3>
+                <span class="close edit-close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <form id="editForm">
+                    <input type="hidden" id="editImgId" name="img_id">
+
+                    <div class="form-group">
+                        <label><i class="fa-solid fa-satellite" aria-hidden="true"></i> Тип съёмки:</label>
+                        <select id="editSurveyType" name="survey_type" class="custom-select">
+                            <option value="uav">БПЛА (Дрон)</option>
+                            <option value="aerophoto">Аэрофото (Самолет)</option>
+                            <option value="space">Космос (Спутник)</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group"><label><i class="fa-solid fa-calendar-days" aria-hidden="true"></i> Дата съёмки:</label><input type="date" id="editDate" name="date_shot" required></div>
+                    <div class="form-group"><label><i class="fa-solid fa-helicopter" aria-hidden="true"></i> Оборудование:</label><input type="text" id="editEquip" name="equipment" required></div>
+                    <div class="form-group"><label><i class="fa-solid fa-file-lines" aria-hidden="true"></i> № Договора:</label><input type="text" id="editContract" name="contract" required></div>
+                    <div class="form-group"><label><i class="fa-solid fa-building" aria-hidden="true"></i> Организация:</label><input type="text" id="editOrg" name="organization" required></div>
+
+                    <button type="submit" class="btn-forest btn-wood btn-full" style="margin-top: 15px;"><i class="fa-solid fa-floppy-disk"></i> Сохранить</button>
+                </form>
+                <div id="editStatus" class="status-message"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="shpModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(to right, #8e44ad, #9b59b6);">
+                <h3><i class="fa-solid fa-layer-group"></i> Добавить SHP слой</h3>
+                <span class="close shp-close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <form id="shpForm">
+                    <div class="form-group">
+                        <label>Название слоя:</label>
+                        <input type="text" name="layer_name" placeholder="Например: Квартальная сеть" required>
+                    </div>
+
+                    <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+                        <div style="flex: 1;">
+                            <label>Цвет:</label>
+                            <input type="color" name="layer_color" value="#9b59b6" style="width: 100%; height: 40px; padding: 2px; border: 1px solid #ccc; border-radius: 4px;">
+                        </div>
+                        <div style="flex: 1;">
+                            <label>Толщина линии:</label>
+                            <input type="number" name="layer_weight" value="2" min="1" max="10" style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 6px;">
+                        </div>
+                    </div>
+
+                    <div class="form-group" style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" id="checkFilled" name="layer_filled" checked style="width: 20px; height: 20px;">
+                        <label for="checkFilled" style="margin: 0; cursor: pointer;"><i class="fa-solid fa-fill-drip" aria-hidden="true"></i> Использовать заливку</label>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Файлы (.shp, .shx, .dbf, .prj):</label>
+                        <input type="file" id="shpFiles" name="files[]" multiple accept=".shp,.shx,.dbf,.prj" required>
+                        <small style="color: #666; display:block; margin-top:5px;">
+                            <i class="fa-solid fa-circle-exclamation"></i> Выберите все 3-4 файла сразу!
+                        </small>
+                    </div>
+
+                    <button type="submit" class="btn-forest btn-full" style="background: #8e44ad; color: white; margin-top: 15px;">
+                        <i class="fa-solid fa-upload"></i> Загрузить на карту
+                    </button>
+                </form>
+                <div id="shpStatus" class="status-message" style="margin-top: 10px;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="basemapModal" class="modal">
+        <div class="modal-content modal-content-dark">
+            <div class="modal-header" style="border-bottom: 1px solid #444; padding-bottom: 15px;">
+                <h3 style="color: #82e938; margin: 0;"><i class="fa-solid fa-map"></i> Новая подложка</h3>
+                <span class="close basemap-close" style="color: #888; cursor: pointer; font-size: 24px;">&times;</span>
+            </div>
+            <div class="modal-body" style="padding-top: 20px;">
+                <form id="basemapForm">
+                    <div class="form-group" style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px;">Название слоя:</label>
+                        <input type="text" name="name" required placeholder="Например: Топокарта Генштаб" class="dark-input">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px;">Файлы (Выберите .map И .ozf2/.png вместе):</label>
+                        <input type="file" name="file" accept=".ozf2,.map,.tif,.tiff,.png,.jpg" multiple required style="width: 100%; color: #ccc;">
+                        <p style="font-size: 11px; color: #888; margin-top: 8px;">
+                            Для OziExplorer выделите сразу 2 файла: <b>.map</b> и сам снимок (<b>.ozf2</b>).
+                        </p>
+                    </div>
+                    <div id="basemapStatus" style="margin-top: 10px; font-size: 13px; min-height: 20px;"></div>
+                    <button type="submit" id="basemapSubmitBtn" class="btn-forest" style="width: 100%; padding: 12px; margin-top: 10px; font-weight: bold; background: #82e938; color: #000; border: none; border-radius: 5px; cursor: pointer;">
+                        ЗАГРУЗИТЬ
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+<!-- [v18 PERF] Leaflet/VectorGrid/Geoman/GeometryUtil/Turf удалены — не используются (карта на OpenLayers) -->
+    <script src="https://cdn.jsdelivr.net/npm/proj4@2.10.0/dist/proj4.js" crossorigin="anonymous" defer></script>
+    <!-- [PERF] ol.js грузим явно с defer — убирает цепочку динамической загрузки из map-core.js.
+         preload в <head> уже начал скачивание, defer гарантирует выполнение после HTML-парсинга. -->
+    <script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js" crossorigin="anonymous" defer></script>
+
+    <script>
+        // ============================================================
+        // ГЛОБАЛЬНЫЕ ФУНКЦИИ — должны быть объявлены ДО загрузки map.js
+        // ============================================================
+
+        /**
+         * Перестраивает дерево лесхозов в сайдбаре.
+         * Вызывается из map.js после загрузки снимков (loadAllImages).
+         */
+        window.buildTreeFromData = function () {
+            const container = document.getElementById('tree-container');
+            if (!container) {
+                console.warn('buildTreeFromData: #tree-container не найден');
+                return;
+            }
+            // buildUserStats определена внутри map.js — вызываем если доступна
+            if (typeof window.buildUserStats === 'function') {
+                window.buildUserStats(container);
+            } else if (typeof window.buildAdminTree === 'function') {
+                window.buildAdminTree(container);
+            } else {
+                console.warn('buildTreeFromData: ни buildUserStats, ни buildAdminTree не найдены');
+            }
+        };
+
+        /**
+         * Показывает всплывающее уведомление (тост).
+         * @param {string} message — текст сообщения
+         * @param {boolean} isError — true = красный, false = зелёный
+         */
+        window.showToast = function (message, isError) {
+            // Удаляем предыдущий тост если он есть
+            const old = document.getElementById('_global_toast');
+            if (old) old.remove();
+
+            const toast = document.createElement('div');
+            toast.id = '_global_toast';
+            toast.style.cssText = `
+                position: fixed;
+                bottom: 24px;
+                left: 50%;
+                transform: translateX(-50%) translateY(20px);
+                background: ${isError ? 'linear-gradient(135deg,#c0392b,#e74c3c)' : 'linear-gradient(135deg,#1a5c1a,#27ae60)'};
+                color: #fff;
+                padding: 11px 22px;
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: 'Lato', sans-serif;
+                z-index: 99999;
+                box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.25s ease, transform 0.25s ease;
+                max-width: 360px;
+                text-align: center;
+                line-height: 1.4;
+            `;
+            toast.innerHTML = (isError ? '⚠️ ' : '✅ ') + message;
+            document.body.appendChild(toast);
+
+            // Анимация появления
+            requestAnimationFrame(() => {
+                toast.style.opacity = '1';
+                toast.style.transform = 'translateX(-50%) translateY(0)';
+            });
+
+            // Автоудаление через 3.5 сек
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(-50%) translateY(10px)';
+                setTimeout(() => toast.remove(), 300);
+            }, 3500);
+        };
+
+        /**
+         * Переключение режима загрузки (Файлы / Папка) в модальном окне.
+         */
+        function toggleUploadMode() {
+            const mode = document.querySelector('input[name="uploadMode"]:checked')?.value;
+            document.getElementById('filesBlock').style.display  = mode === 'files'  ? 'block' : 'none';
+            document.getElementById('folderBlock').style.display = mode === 'folder' ? 'block' : 'none';
+        }
+
+        /**
+         * [C] Возвращает CSRF-токен из мета-тега.
+         * Использовать в fetch: headers: { 'X-CSRFToken': window.getCsrfToken() }
+         */
+        window.getCsrfToken = function() {
+            const m = document.querySelector('meta[name="csrf-token"]');
+            return m ? m.getAttribute('content') : '';
+        };
+
+        /**
+         * [C] Обёртка fetch с автоматическим добавлением CSRF-заголовка
+         * для мутирующих методов (POST, DELETE, PATCH, PUT).
+         */
+        window.secureFetch = function(url, options) {
+            options = options || {};
+            const method = (options.method || 'GET').toUpperCase();
+            if (['POST', 'DELETE', 'PATCH', 'PUT'].includes(method)) {
+                options.headers = options.headers || {};
+                options.headers['X-CSRFToken'] = window.getCsrfToken();
+            }
+            return fetch(url, options);
+        };
+    </script>
+
+<!-- [PERF] defer — скрипты не блокируют HTML-парсинг, выполняются в порядке после DOMContentLoaded.
+     map-core.js должен идти первым (инициализирует AppState/CONFIG), панели зависят от него. -->
+<!-- [v18 PERF] стили этого места уже в бандле index (в <head>); здесь — их повторное подключение
+     в прежнем месте каскада, чтобы они по-прежнему перекрывали <style>, которые панели добавляют из JS.
+     Грузится без блокировки отрисовки (defer): на первый экран не влияет — проверено сравнением
+     вычисленных стилей всех элементов с ним и без него. -->
+{{ css_bundle('index-late', defer=True) }}
+<script defer src="/static/unified-search.js?v=all-layers-v2"></script>
+<script defer src="/static/tool-panels-ui.js?v=v17"></script>
+<script defer src="/static/map-icon-style.js?v=v17"></script>
+<!-- [v16] исправления раскладки — последним, после map-icon-style/tool-panels-ui -->
+<!-- [v17] компактный читаемый дизайн: шрифт Inter, панели-карточки, кнопки 40 px, новая линейка — САМЫЙ последний -->
+<script defer src="/static/geoservice-help-data.js?v=independent-v15"></script>
+<script defer src="/static/geoservice-help.js?v=independent-v15"></script>
+<script defer src="/static/map-core.js?v={{ version }}-v208"></script>
+<!-- Режим «ВИД 2D/3D»: 3D-модель местности лесхоза (three.js локально, /static/vendor/three/) -->
+<!-- [v19] подписи кварталов/выделов без дрожания (forest3d-labels.js) — до forest3d-vector-boundaries.js -->
+<script defer src="/static/forest3d-labels.js?v=v19"></script>
+<script defer src="/static/forest3d-vector-boundaries.js?v=v19"></script>
+<script defer src="/static/forest3d-map-layers.js?v=v19"></script>
+<script defer src="/static/forest3d-terrain.js?v=v20"></script>
+<!-- [v20] почвенный покров и микрорельеф поверхности 3D — до view3d.js -->
+<script defer src="/static/forest3d-ground.js?v=v20"></script>
+<!-- [v19] ЛесоЛидар (обработка LAS) и реалистичные деревья — до view3d.js -->
+<script defer src="/static/lesolidar-web.js?v=v19"></script>
+<script defer src="/static/forest3d-trees.js?v=v20"></script>
+<!-- [v20.11] TaxationData: локальный анализ MDB и контроль выделов -->
+<script defer src="/static/forest3d-taxation.js?v=v20.12"></script>
+<script defer src="/static/view3d.js?v={{ version }}-v20.12"></script>
+<!-- [FIX] map_styles_patch.css — это JS-файл (патч UI-анимаций), переименован в .js -->
+<script defer src="/static/map_styles_patch.js?v={{ version }}"></script>
+<script defer src="/static/panel-layers.js?v=v18"></script>
+<script defer src="/static/ui-v17.js?v=v17"></script>
+<!-- Голосовой поиск для строки поиска лесхозов/нас.пунктов (id=lsp-search-input) -->
+<script defer src="/static/voicerec.js?v={{ version }}"></script>
+<script defer src="/static/ui-enhance.js?v={{ version }}-v17"></script>
+<!-- [v20.8] настоящий охват снимков ДЗЗ из GeoServer: «Приблизить к слою», поиск, «Съёмка по годам» -->
+<script defer src="/static/dzz-extent.js?v={{ version }}-v208"></script>
+<script defer src="/static/panel-dzz.js?v={{ version }}"></script>
+<script defer src="/static/panel-hotspots.js?v={{ version }}"></script>
+<!-- [v20.8] «Съёмка по годам» переработана: не перекрывает кнопки и линейку, приближение по охвату GeoServer -->
+<script defer src="/static/panel-timeline.js?v={{ version }}-v208"></script>
+<script defer src="/static/panel-print.js?v={{ version }}-v17"></script>
+<script>window.COG_FILE_BASE_PATH = 'file:///W:/Data';</script>
+<script defer src="/static/announcement_modal.js?v={{ version }}"></script>
+<script defer src="/static/perf-v18.js?v=v18"></script>
+
+<!-- mobile_patch.js удалён: файла нет на сервере (404 → ошибка MIME) -->
+
+
+
+
+        // Глобальная обработка горячих клавиш для плавающей кнопки каталога
+        document.addEventListener('keydown', function(event) {
+            const btn = document.getElementById('downloadBtn');
+            if (!btn) return;
+
+            // Alt + O (Показать кнопку скачивания каталога)
+            if (event.altKey && (event.key === 'o' || event.key === 'O' || event.key === 'щ' || event.key === 'Щ')) {
+                event.preventDefault();
+                btn.style.display = 'flex';
+                btn.style.opacity = '0';
+                setTimeout(() => { btn.style.opacity = '1'; }, 50);
+            }
+            
+            // Alt + Z (Скрыть кнопку)
+            if (event.altKey && (event.key === 'z' || event.key === 'Z' || event.key === 'я' || event.key === 'Я')) {
+                event.preventDefault();
+                btn.style.display = 'none';
+            }
+        });
+    </script>
+
+
+    <script>
+        // ======= SESSION INIT & GUEST BANNER =======
+        // [G][B] SECURITY: роли пользователя НЕ передаются в глобальные JS-переменные.
+        // Все admin-проверки выполняются ТОЛЬКО на сервере через require_admin dependency.
+        // UI-состояние (показ кнопок) управляется через Jinja2-шаблонизацию (if is_admin).
+        // window.IS_ADMIN и window.HAS_PROFILE намеренно НЕ объявлены — используйте /api/session/me.
+
+      async function initSession() {
+            try {
+                // [PERF] Один запрос /api/session/init вместо цепочки:
+                // session/register → session/me + inbox_count + avatar/me
+                // Было: ~1944ms (критическая цепочка из 3 запросов)
+                // Стало: ~300ms (один POST, профиль + inbox + фото параллельно на сервере)
+                const resp = await fetch('/api/session/init', { method: 'POST' });
+                if (!resp.ok) return;
+                const data = await resp.json();
+
+                if (data.blocked) {
+                    if (data.reason === 'frozen') window.location.href = '/frozen';
+                    else if (data.reason === 'deleted') window.location.href = '/blacklist';
+                    return;
+                }
+                window._sessionUserId = data.user_id;
+
+                // Применяем inbox_count сразу
+                const cnt = data.inbox_count || 0;
+                const badge = document.getElementById('sf-inbox-badge');
+                const icon  = document.getElementById('sf-envelope-icon');
+                const link  = document.getElementById('sf-envelope-link');
+                if (badge && icon && link && cnt > 0) {
+                    badge.textContent = cnt > 99 ? '99+' : String(cnt);
+                    badge.style.display = 'flex';
+                    link.classList.add('has-mail');
+                    icon.className = 'fa-solid fa-envelope';
+                    icon.style.color = '#e74c3c';
+                }
+
+                const me = data.me;
+                if (!me) return;
+
+                // [v20.9] Фото, рамку и эмодзи статуса рисует static/avatar-sync.js — как в «Сообщениях»
+                if (window.GeoAvatar && me.has_profile) window.GeoAvatar.refresh();
+
+                if (me.has_profile) {
+                    const guestBlock = document.getElementById('sf-guest-block');
+                    const regBlock   = document.getElementById('sf-registered-block');
+                    const nameEl     = document.getElementById('sf-reg-name');
+                    if (guestBlock) guestBlock.style.display = 'none';
+                    if (regBlock)   regBlock.style.display   = '';
+                    if (nameEl)     nameEl.textContent = me.display_name || me.user_name || "Пользователь";
+                    const deptEl2 = document.getElementById('sf-reg-dept');
+                    if (deptEl2 && me.organization_name) { deptEl2.textContent = me.organization_name; deptEl2.style.display = ''; }
+                    const banner = document.getElementById('guestBanner');
+                    if (banner) banner.classList.remove('show');
+                } else {
+                    // Настоящий гость — показываем кнопку анкеты
+                    const profileBtn = document.getElementById('sidebarProfileBtn');
+                    if (profileBtn) profileBtn.style.display = 'block';
+                }
+            } catch(e) {
+                console.warn('Session init error:', e);
+            }
+        }
+        function openProfileModal() {
+            document.getElementById('profileModal').classList.add('show');
+        }
+
+        async function submitProfile() {
+            const name = document.getElementById('profileName').value.trim();
+            const org = document.getElementById('profileOrg').value.trim();
+            if (!name || !org) { alert('Пожалуйста, заполните оба поля.'); return; }
+            try {
+                const resp = await fetch('/api/session/submit_profile', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_name: name, organization_name: org })
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    document.getElementById('profileFormArea').style.display = 'none';
+                    document.getElementById('profileSuccess').style.display = 'block';
+                    setTimeout(() => {
+                        document.getElementById('profileModal').classList.remove('show');
+                        document.getElementById('guestBanner').classList.remove('show');
+                    }, 2500);
+                } else {
+                    alert(data.error || 'Ошибка отправки');
+                }
+            } catch(e) { alert('Ошибка сети'); }
+        }
+
+        // Периодическая проверка статуса (каждые 5 минут)
+        setInterval(async () => {
+            try {
+                const resp = await fetch('/api/session/check');
+                const data = await resp.json();
+                if (data.status === 'frozen') window.location.href = '/frozen';
+                if (data.status === 'deleted') window.location.href = '/blacklist';
+            } catch(e) {}
+        }, 300000);
+
+        // Запуск при загрузке
+        document.addEventListener('DOMContentLoaded', initSession);
+
+        // Ссылка в баннере на консоль пользователей для администратора
+        // Кнопка пользователей теперь в sidebar-footer для администратора
+    </script>
+
+
+    <!-- ============================================================
+         WEATHER POPUP — слой погоды для лесхозов
+         Добавлено автоматически; не удалять!
+    ============================================================ -->
+    <div id="weather-popup" style="display:none; position:absolute; background:#fff;
+         border:1px solid #ccc; border-radius:8px; padding:16px 20px; min-width:320px;
+         box-shadow:0 4px 16px rgba(0,0,0,.18); z-index:9999;">
+      <a id="weather-popup-close" href="#"
+         style="position:absolute;top:8px;right:12px;font-size:18px;color:#888;text-decoration:none;">×</a>
+      <h3 style="margin:0 0 10px; font-size:16px;">Внешние атрибуты</h3>
+      <h4 style="margin:0 0 8px; font-size:13px; color:#555;">Данные</h4>
+      <div id="weather-popup-content"></div>
+    </div>
+
+    <style>
+    /* Таблица внутри weather-popup */
+    .weather-attr-table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+    }
+    .weather-attr-table thead tr {
+      background: #e8f5e9;
+    }
+    .weather-attr-table th {
+      padding: 6px 10px;
+      text-align: left;
+      color: #2e7d32;
+      font-weight: 600;
+      border: 1px solid #c8e6c9;
+    }
+    .weather-attr-table td {
+      padding: 5px 10px;
+      border: 1px solid #e0e0e0;
+    }
+    .weather-attr-table tr:nth-child(even) td {
+      background: #fafafa;
+    }
+    </style>
+
+<script>
+/* [v20.5] /?register=1 — переход с превью-страницы по кнопке «Зарегистрироваться»: сразу открыть анкету гостя
+   (параметр убирается из адреса; администратору и уже зарегистрированным анкета не навязывается). */
+(function () {
+  var u; try { u = new URL(location.href); } catch (e) { return; }
+  if (u.searchParams.get('register') !== '1') return;
+  u.searchParams.delete('register');
+  try { history.replaceState(history.state, '', u.pathname + u.search + u.hash); } catch (e) {}
+  var guest = {{ 'false' if (is_admin or is_registered or has_profile) else 'true' }};
+  if (!guest) return;
+  var tries = 0;
+  (function go() {
+    if (typeof window.openProfileModal === 'function' && document.getElementById('profileModal')) { window.openProfileModal(); return; }
+    if (++tries < 60) setTimeout(go, 120);
+  })();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+/* stand_emul.css — ТОЛЬКО для стенда тестов v20.9.
+   В рабочей копии нет файлов прода style.css, design-system-v15.css/.js, sidebar_profile_menu.css/.js,
+   tool-panels-ui.css и др. (бандл index без них «рассыпается»). Здесь — их грубая замена: раскладка
+   «боковая панель + карта», токены темы v15 по умолчанию (тёмная лесная) и всплывающее меню профиля.
+   Подключается тестом в начало <head> — ниже по каскаду, чем всё остальное (как style.css в бандле). */
+html{--gs-font:"Inter",system-ui,sans-serif;--gs-bg:#0b1914;--gs-card:#13281f;--gs-soft:#1b362b;--gs-tint:#294331;--gs-ink:#edf7ef;
+ --gs-muted:#b4c9be;--gs-line:#577568;--gs-accent:#b7ed83;--gs-on:#132419;--gs-danger:#ffb5ab;--gs-warn:#ffda9c;--gs-warn-bg:#3b3020;--gs-header:#10291d}
+html,body{margin:0;height:100%;overflow:hidden}
+body{background:var(--gs-bg);color:var(--gs-ink);font-family:var(--gs-font)}
+.app-container{display:flex;height:100vh;width:100vw;overflow:hidden}
+.sidebar{width:300px;flex:0 0 300px;display:flex;flex-direction:column;background:var(--gs-bg);color:var(--gs-ink);height:100vh;overflow:hidden;position:relative;z-index:1000;border-right:1px solid rgba(255,255,255,.06)}
+.sidebar .forest-header{position:relative;height:88px;overflow:hidden;background:var(--gs-header)}
+.sidebar .forest-header .fh-bg{position:absolute;inset:0;background:linear-gradient(180deg,#0d2418,#16341f)}
+.sidebar .forest-header .fh-grid{position:absolute;inset:0;opacity:.25;background-image:linear-gradient(rgba(255,255,255,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.06) 1px,transparent 1px);background-size:16px 16px}
+.sidebar #fh-scene-canvas{position:absolute;inset:0;width:100%;height:100%}
+.sidebar .fh-inner{position:relative;display:flex;align-items:center;height:100%}
+.sidebar .fh-texts{background:rgba(5,14,9,.55);color:#fff}
+.sidebar .fh-title{color:#fff}.sidebar .fh-subtitle{color:#cfe8d2}
+#sidebar-search-inner{display:flex;align-items:center;background:var(--gs-card);color:var(--gs-ink)}
+#sidebar-search-inner input{flex:1;background:transparent;border:0;color:var(--gs-ink);min-width:0}
+#sidebar-search-inner button{border:0;background:transparent;color:var(--gs-muted);display:grid}
+#tree-container{flex:1 1 auto;overflow:auto;min-height:40px}
+.sidebar-footer{flex:0 0 auto}
+.sf-marquee-wrap{overflow:hidden;white-space:nowrap}.sf-marquee-track{display:inline-flex}
+.sf-user-row{width:100%;display:flex;align-items:center;cursor:pointer;text-align:left;color:var(--gs-ink);font:inherit}
+.sf-user-text{align-items:flex-start}
+.sf-profile-chevron{display:grid;place-items:center;color:var(--gs-muted)}
+.sf-profile-chevron svg{width:16px;height:16px}
+.sf-profile-unread[hidden]{display:none}
+.sf-profile-menu{position:absolute;left:12px;right:12px;bottom:76px;background:var(--gs-card);border:1px solid var(--gs-line);border-radius:12px;
+ box-shadow:0 12px 32px rgba(0,0,0,.35);padding:6px;z-index:1200;display:flex;flex-direction:column;gap:1px}
+.sf-profile-menu[hidden]{display:none}
+.sf-profile-menu-heading{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--gs-muted);padding:6px 10px 4px}
+.sf-profile-menu-item{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;color:var(--gs-ink);text-decoration:none;position:relative}
+.sf-profile-menu-item svg{width:18px;height:18px;flex:0 0 18px;color:var(--gs-accent)}
+.sf-profile-menu-item:hover{background:rgba(255,255,255,.92);color:#b7ed83}   /* как жалуются в проде: текст сливается с белым */
+.sf-profile-menu-divider{height:1px;background:var(--gs-line);margin:4px 6px;opacity:.6}
+.sf-badge{position:static;margin-left:auto}
+#map{flex:1 1 auto;position:relative;height:100vh;background:#e4ebe0}
+.modal,#profileModal,#loadingOverlay,#hotkey-modal{display:none}
+.floating-download-btn{display:none}
+#guestBanner{display:none}
+
+/* подложка карты на стенде (тайлы не грузятся офлайн) */
+#map{background:#c9d3bf url(/__stand/tile.png) 0 0/256px 256px repeat!important}

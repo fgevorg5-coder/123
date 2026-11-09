@@ -1,0 +1,57 @@
+Геосервис v20.10 — снимки из «Съёмки по годам» снова на карте; крупная шкала; ЛесоЛидар и редактор методичек
+
+ЧТО ИСПРАВЛЕНО
+- «Съёмка по годам»: выбранный снимок не показывался и не догружался при приближении — шкала включала слой
+  без имени, и каждый тайл GeoServer возвращал ошибкой. Теперь снимок виден сразу и догружается при зуме.
+- Шкала крупнее: по умолчанию 130 %. В шапке шкалы кнопки «A−» / «A+» (100–175 %), щелчок по проценту — 130 %.
+  Размер запоминается. На низком/узком экране шкала уменьшается сама, чтобы не закрывать карту.
+- ЛесоЛидар «Не настроен: Не найден LesoLidar.exe»: администратор видит точный путь, куда положить программу,
+  и кнопку «Проверить снова» — программа подхватывается БЕЗ перезапуска. Как настроить — ниже.
+- «Методички»: «сервер редакций не подключён… Установите модуль manuals_editor_api» — модуля не было в поставке.
+  Теперь он есть: manuals_editor_api.py. Администратор правит веб-редакцию и сохраняет, читают все.
+
+УСТАНОВКА (поверх v20.9 или любой v20.x)
+1. Остановить приложение.
+2. Скопировать СОДЕРЖИМОЕ папки geoservice из архива в корень приложения (например D:\DZZ_geo), с заменой.
+   Саму папку geoservice внутрь НЕ копировать: должно получиться D:\DZZ_geo\manuals_editor_api.py рядом с app.py.
+   Для отката заранее сохраните app.py, lesolidar_bridge.py, security_hardening.py и папку static.
+   Если ваш app.py правился вручную — не заменяйте его, а вставьте блок из README_DEPLOY_RU.md
+   (раздел «Редактор методичек»).
+3. Запустить приложение — ПЕРЕЗАПУСК НУЖЕН (новые и изменённые .py). В журнале запуска должна быть строка
+   «✅ Редактор методичек (manuals_editor_api) подключён».
+4. В браузере Ctrl+F5.
+5. Проверка — в папке приложения:
+       python check_install_v20.10.py
+       python check_install_v20.10.py --url http://127.0.0.1:<порт>
+   или в браузере: <адрес портала>/api/manuals-editions/_status  →  "ready": true, "version": "20.10".
+
+ЛЕСОЛИДАР — КАК НАСТРОИТЬ (один раз; программа в архив не входит)
+1. Возьмите папку программы ЦЕЛИКОМ: LesoLidar.exe + папка _internal (и models, tables, если есть).
+2. Скопируйте её так, чтобы получилось:
+       D:\DZZ_geo\tools\LesoLidar\LesoLidar.exe
+       D:\DZZ_geo\tools\LesoLidar\_internal\
+   («папка в папке» после распаковки — tools\LesoLidar\LesoLidar\LesoLidar.exe — тоже подходит.)
+   ИЛИ впишите в D:\DZZ_geo\.env строку:   LESOLIDAR_EXE=D:\путь\к\LesoLidar.exe
+3. Войдите администратором, откройте «ЛесоЛидар» и нажмите «Проверить снова» — перезапуск не нужен.
+   Точный путь для вашего сервера показан прямо в окне «Не настроен» (виден только администратору).
+4. «Нет папки _internal» — скопирована не вся папка; «там нет LesoLidar.exe» — исправьте путь в .env.
+
+ФАЙЛЫ В АРХИВЕ (накопительно v20.3–v20.10)
+  v20.10 manuals_editor_api.py (новый), app.py, lesolidar_bridge.py, security_hardening.py,
+         static\map-core.js, static\panel-timeline.js, static\lesolidar-web.js, static\manuals-workspace.js,
+         check_install_v20.10.py (проверка установки, после проверки можно удалить)
+  v20.9  static\themes\ (gt-boot.js, gt.js, gt-*.css, fonts\), static\avatar-sync.js/.css, static\profile-v18.js,
+         templates\*.html (9 шт.)
+  v20.8  static\dzz-extent.js
+  v20.7  georef_api.py, georef_shift.py, tools\georef\*, static\panel-georef.js, static\panel-crs.js
+  v20.6  static\header-scene.js
+  v20.5  preview_page.py, static\preview\*, tools\preview\*
+  v20.3  georef_runner.py, jobkit.py, tools\georef\tif2mbtiles.py
+
+НЕ МЕНЯЮТСЯ: БД, nginx, GeoServer, пакеты Python. Новые переменные .env (необязательно):
+  MANUALS_EDITIONS_DIR (instance\manuals_editions), MANUALS_EDITION_MAX_MB (40), MANUALS_EDITIONS_KEEP (100).
+  Папку instance\manuals_editions включите в резервное копирование — там сохранённые редакции методичек.
+
+Подробно — README_DEPLOY_RU.md (разделы «v20.10», «ЛесоЛидар», «Редактор методичек»), CHANGELOG_RU.md (v20.10),
+построчно — geoservice\changes_v20.9_to_v20.10.diff, тесты — tests\dzz_timeline, tests\manuals_editor,
+tests\lesolidar\test_lesolidar_detect.py, отчёт — reports\v20.10_report.md, снимки — reports\v20.10_shots.

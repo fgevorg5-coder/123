@@ -1,0 +1,7 @@
+/* Стенд: в проде эти правила даёт vacancy.css (в комплект стенда он не входит).
+   Без них окно «Заявление за свой счёт» (#vf-modal-overlay) на стенде было бы всегда видно. */
+#vf-modal-overlay { display: none; position: fixed; inset: 0; z-index: 10050; align-items: center; justify-content: center; background: rgba(0, 0, 0, .5); }
+#vf-modal-overlay.open { display: flex; }
+#vf-modal-overlay .vf-modal { background: var(--u-card); color: var(--u-ink); border: 1px solid var(--u-line2); border-radius: 16px; width: min(600px, calc(100% - 32px)); max-height: 90vh; overflow: auto; padding: 18px 20px; box-shadow: 0 24px 60px rgba(0, 0, 0, .35); }
+#vf-modal-overlay .vf-input { width: 100%; height: 40px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--u-line); background: var(--u-soft); color: var(--u-ink); box-sizing: border-box; }
+#vf-modal-overlay .vf-input::placeholder { color: var(--u-muted); }
