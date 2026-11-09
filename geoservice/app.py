@@ -3390,8 +3390,12 @@ _WMS_MAX_SIDE = int(os.getenv("WMS_MAX_SIDE", "1024"))
 def _wms_params_error(params: dict):
     """Проверяет WIDTH/HEIGHT/BBOX GetMap-запроса. Возвращает текст ошибки или None."""
     lower = {k.lower(): v for k, v in params.items()}
-    if lower.get("request", "").upper() not in ("GETMAP", "GETFEATUREINFO", ""):
+    req = lower.get("request", "").upper()
+    if req not in ("GETMAP", "GETFEATUREINFO", ""):
         return None  # GetCapabilities/GetLegendGraphic — размеров нет
+    # GetFeatureInfo передаёт размер всего окна карты (2000+ px) — картинка не рендерится,
+    # поэтому ограничиваем лишь разумным максимумом экрана, а не размером тайла.
+    max_side = 16384 if req == "GETFEATUREINFO" else _WMS_MAX_SIDE
     for name in ("width", "height"):
         raw = lower.get(name)
         if raw is None:
@@ -3400,8 +3404,8 @@ def _wms_params_error(params: dict):
             v = int(raw)
         except ValueError:
             return f"Некорректный {name.upper()}"
-        if not 1 <= v <= _WMS_MAX_SIDE:
-            return f"{name.upper()} вне диапазона 1..{_WMS_MAX_SIDE}"
+        if not 1 <= v <= max_side:
+            return f"{name.upper()} вне диапазона 1..{max_side}"
     bbox = lower.get("bbox")
     if bbox is not None:
         try:
