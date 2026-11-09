@@ -11,6 +11,7 @@ LesoLidar (облака точек) и привязка планов / MBTiles (
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -23,6 +24,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
+
+try:
+    from .perf_kit import TTLCache     # type: ignore
+except ImportError:                    # pragma: no cover
+    from perf_kit import TTLCache      # type: ignore
 
 MB = 1024 * 1024
 ID_RE = re.compile(r"^[0-9a-f]{12,32}$")
@@ -250,6 +256,10 @@ class JobStore:
         self.timeout = float(timeout_s)
         self.keep = int(keep)
         self.keep_hours = keep_hours
+        # короткий кэш списка заданий: опрос N клиентами не сканирует диск N раз;
+        # записи других процессов видны не позже чем через TTL
+        self._jobs_cache = TTLCache(maxsize=1, ttl=1.0)
+        self._jobs_gen = 0
         self.runner_lock = _ProcessLock(self.root / "runner.lock")
         self.is_runner = False
         self._stop = threading.Event()
@@ -317,14 +327,25 @@ class JobStore:
             return
         with self.lock:
             _atomic_json(jd / "job.json", j)
+        self._invalidate_jobs()
+
+    def _invalidate_jobs(self) -> None:
+        self._jobs_gen += 1            # скан, начатый до записи, не должен попасть в кэш
+        self._jobs_cache.clear()
 
     def jobs(self) -> List[Dict[str, Any]]:
+        cached = self._jobs_cache.get("all")
+        if cached is not None:
+            return copy.deepcopy(cached)   # вызывающие меняют словари — отдаём копии
+        gen = self._jobs_gen
         out = []
         for d in (self.root / "jobs").iterdir():
             j = _read_json(d / "job.json") if d.is_dir() else None
             if j:
                 out.append(j)
         out.sort(key=lambda j: j.get("created", 0), reverse=True)
+        if gen == self._jobs_gen:
+            self._jobs_cache.put("all", copy.deepcopy(out))
         return out
 
     def enqueue(self, j: Dict[str, Any]) -> None:
@@ -376,6 +397,7 @@ class JobStore:
             if not self.jdir(jid).exists():
                 break
             time.sleep(0.25)
+        self._invalidate_jobs()
         return not self.jdir(jid).exists()
 
     # ── исполнитель очереди (один на сервер) ──
@@ -461,6 +483,8 @@ class JobStore:
             old += [j for j in done[:self.keep] if float(j.get("finished") or j.get("created") or 0) < edge]
         for j in old:
             shutil.rmtree(self.jdir(j["id"]), ignore_errors=True)
+        if old:
+            self._invalidate_jobs()
 
     def _start(self, j: Dict[str, Any]) -> None:
         jid = j["id"]

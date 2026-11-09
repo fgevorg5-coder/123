@@ -1116,7 +1116,7 @@ app = FastAPI(
 )
 
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
+def favicon():
     favicon_path = os.path.join(BASE_DIR, "favicon.ico")
     if os.path.exists(favicon_path):
         return FileResponse(favicon_path, media_type="image/x-icon")
@@ -1410,10 +1410,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 detail = qs[:300] if qs else ""
                 sc = response.status_code
                 # fire-and-forget, не ждём завершения
-                asyncio_module = __import__("asyncio")
-                asyncio_module.create_task(
-                    run_in_threadpool(_audit_write, ip, action, resource, sc, detail)
-                )
+                _spawn_bg(run_in_threadpool(_audit_write, ip, action, resource, sc, detail))
         except Exception:
             pass  # аудит никогда не должен ронять основной ответ
         return response
@@ -1549,6 +1546,7 @@ _http_session.mount('https://', _adapter)
 # Ключ: (url_без_параметра_time, args_str)  →  (bytes, content_type)
 # ----------------------------------------------------------
 import functools, collections
+import perf_kit as _pk  # [v20.13] TTL-кэш, single-flight, предохранители, троттлинг
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TILE CACHE — Redis-первый с LRU-fallback
@@ -1566,6 +1564,9 @@ import functools, collections
 #   REDIS_URL      = redis://127.0.0.1:6379/0   (опционально)
 #   REDIS_TILE_TTL = 86400                       (секунды, default 1 сутки)
 # ──────────────────────────────────────────────────────────────────────────────
+
+# [v20.13] Адрес внутреннего GeoServer — из .env (раньше был захардкожен в 5 местах).
+GEOSERVER_BASE_URL = os.getenv("GEOSERVER_BASE_URL", "http://192.168.12.109:9090/geoserver").rstrip("/")
 
 _REDIS_URL      = os.getenv("REDIS_URL", "")          # "" → Redis отключён
 _REDIS_TILE_TTL = int(os.getenv("REDIS_TILE_TTL", "86400"))
@@ -1602,25 +1603,52 @@ _tile_cache: collections.OrderedDict = collections.OrderedDict()
 _tile_cache_lock = threading.Lock()
 
 
+# [v20.13] Redis-вызовы больше не делаются из event loop: при зависшем Redis
+# (socket_timeout=1) каждый тайл раньше «замораживал» весь сервер на 1-2 с.
+# Чтение — через threadpool (_tile_cache_aget), запись — fire-and-forget в
+# отдельном маленьком пуле; после 3 ошибок подряд Redis отключается на 30 с.
+_redis_breaker = _pk.CircuitBreaker("redis", threshold=3, cooldown=30.0)
+_redis_executor = _futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="redis")
+
+
+def _redis_available() -> bool:
+    return bool(_redis_ok and _redis_client) and _redis_breaker.allow()
+
+
 def _tile_cache_get(key: str):
-    """Читает тайл: LRU (в процессе, ~мкс) → Redis (один MGET).
-    [PERF] Раньше порядок был обратный: каждый хит делал ДВА синхронных
-    сетевых запроса в Redis прямо в event loop, даже если тайл уже лежал
-    в памяти процесса. Хит из Redis теперь «поднимается» в LRU."""
+    """Синхронное чтение ТОЛЬКО из LRU процесса (микросекунды, безопасно в loop)."""
     with _tile_cache_lock:
         hit = _tile_cache.get(key)
         if hit is not None:
             _tile_cache.move_to_end(key)
             return hit
-    if _redis_ok and _redis_client:
-        try:
-            data, ct = _redis_client.mget(f"tile:{key}", f"tile:ct:{key}")
-            if data is not None:
-                value = (data, (ct or b"image/png").decode())
-                _tile_lru_put(key, value)
-                return value
-        except Exception as _e:
-            logger.debug(f"[tile-cache] Redis get error: {_e}")
+    return None
+
+
+def _tile_cache_redis_get(key: str):
+    """Блокирующее чтение из Redis — вызывать только из потока."""
+    try:
+        data, ct = _redis_client.mget(f"tile:{key}", f"tile:ct:{key}")
+        _redis_breaker.record_success()
+    except Exception as _e:
+        if _redis_breaker.record_failure():
+            logger.warning(f"[tile-cache] Redis недоступен, отключён на {_redis_breaker.cooldown:.0f} с: {_e}")
+        return None
+    if data is None:
+        return None
+    value = (data, (ct or b"image/png").decode())
+    _tile_lru_put(key, value)
+    return value
+
+
+async def _tile_cache_aget(key: str):
+    """Читает тайл: LRU (в процессе) → Redis (в threadpool). Хит из Redis
+    поднимается в LRU."""
+    hit = _tile_cache_get(key)
+    if hit is not None:
+        return hit
+    if _redis_available():
+        return await run_in_threadpool(_tile_cache_redis_get, key)
     return None
 
 
@@ -1638,19 +1666,27 @@ def _tile_lru_put(key: str, value: tuple):
             _tile_cache_bytes -= len(ev[0]) if ev[0] else 0
 
 
+def _tile_cache_redis_put(key: str, content: bytes, ct: str):
+    try:
+        pipe = _redis_client.pipeline(transaction=False)
+        pipe.setex(f"tile:{key}",    _REDIS_TILE_TTL, content)
+        pipe.setex(f"tile:ct:{key}", _REDIS_TILE_TTL, ct.encode())
+        pipe.execute()
+        _redis_breaker.record_success()
+    except Exception as _e:
+        if _redis_breaker.record_failure():
+            logger.warning(f"[tile-cache] Redis недоступен, отключён на {_redis_breaker.cooldown:.0f} с: {_e}")
+
+
 def _tile_cache_put(key: str, value: tuple):
-    """Записывает тайл (bytes, content_type): Redis + LRU."""
+    """Записывает тайл (bytes, content_type): LRU сразу, Redis — в фоне."""
     content, ct = value
-    if _redis_ok and _redis_client:
-        try:
-            pipe = _redis_client.pipeline(transaction=False)
-            pipe.setex(f"tile:{key}",    _REDIS_TILE_TTL, content)
-            pipe.setex(f"tile:ct:{key}", _REDIS_TILE_TTL, ct.encode())
-            pipe.execute()
-        except Exception as _e:
-            logger.debug(f"[tile-cache] Redis set error: {_e}")
-    # Всегда пишем в LRU (быстрый хит в том же процессе)
     _tile_lru_put(key, value)
+    if _redis_available():
+        try:
+            _redis_executor.submit(_tile_cache_redis_put, key, content, ct)
+        except RuntimeError:
+            pass  # интерпретатор завершается
 
 
 def _tile_cache_flush_all() -> dict:
@@ -2225,26 +2261,28 @@ def load_leshoz_data():
     global _leshoz_gdf_cache
     if _leshoz_gdf_cache is not None:
         return _leshoz_gdf_cache, None
+    # [v20.13] Загрузка целиком под замком: раньше замок закрывал только проверку,
+    # и при холодном старте N потоков читали SHP одновременно (пик RAM × N).
     with _leshoz_cache_lock:
         if _leshoz_gdf_cache is not None:
             return _leshoz_gdf_cache, None
-    shp_files = glob.glob(os.path.join(SHP_FOLDER, '*.shp'))
-    if not shp_files:
-        return None, "Файл .shp не найден в папке shp_leshoz"
-    shp_path = shp_files[0]
-    try:
+        shp_files = glob.glob(os.path.join(SHP_FOLDER, '*.shp'))
+        if not shp_files:
+            return None, "Файл .shp не найден в папке shp_leshoz"
+        shp_path = shp_files[0]
         try:
-            gdf = gpd.read_file(shp_path, encoding='cp1251')
-        except Exception:
-            gdf = gpd.read_file(shp_path, encoding='utf-8')
-        gdf_processed, error = process_forestry_gdf(gdf)
-        if error:
-            return None, error
-        _leshoz_gdf_cache = gdf_processed
-        return gdf_processed, None
-    except Exception as e:
-        logger.error(f"SHP Load Error: {e}")
-        return None, str(e)
+            try:
+                gdf = gpd.read_file(shp_path, encoding='cp1251')
+            except Exception:
+                gdf = gpd.read_file(shp_path, encoding='utf-8')
+            gdf_processed, error = process_forestry_gdf(gdf)
+            if error:
+                return None, error
+            _leshoz_gdf_cache = gdf_processed
+            return gdf_processed, None
+        except Exception as e:
+            logger.error(f"SHP Load Error: {e}")
+            return None, str(e)
 
 
 # ==========================================
@@ -2473,7 +2511,7 @@ def _login_register_success(ip: str) -> None:
 
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
+def login_page(request: Request):
     # [C] Токен создаётся заранее, чтобы форма могла его отправить обратно
     return templates.TemplateResponse(
         request=request,
@@ -2525,7 +2563,7 @@ async def login_submit(
     # 3) Проверка пароля. compare_digest по имени пользователя — чтобы время
     #    ответа не подсказывало, существует ли логин.
     user_ok = _secrets.compare_digest(username or "", "admin")
-    pass_ok = check_password_hash(ADMIN_USER["password_hash"], password)
+    pass_ok = await run_in_threadpool(check_password_hash, ADMIN_USER["password_hash"], password)
     if user_ok and pass_ok:
         _login_register_success(ip)
         # Смена идентификатора сессии после входа — против session fixation
@@ -2549,13 +2587,13 @@ async def login_submit(
 
 
 @app.get("/logout")
-async def logout(request: Request):
+def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/", status_code=302)
 
 
 @app.post("/api/admin/logout")
-async def api_admin_logout(request: Request):
+def api_admin_logout(request: Request):
     request.session.clear()
     return {"ok": True}
 
@@ -2631,13 +2669,13 @@ async def index(request: Request, db: Session = Depends(get_db)):
     )
 
 @app.post("/api/session/register")
-async def api_session_register(request: Request):
+def api_session_register(request: Request):
     """Регистрация сессии гостя — заглушка для совместимости."""
     ip = get_real_ip(request)
     return {"ok": True, "ip": ip, "status": "guest"}
 
 @app.get("/map.js")
-async def serve_map_js(request: Request):
+def serve_map_js(request: Request):
     static_path = os.path.join(BASE_DIR, 'static', 'map.js')
     root_path   = os.path.join(BASE_DIR, 'map.js')
     path = static_path if os.path.exists(static_path) else root_path
@@ -2675,7 +2713,11 @@ async def wms_endpoint(request: Request, db: Session = Depends(get_db)):
     if req_type == 'GetCapabilities':
         return _get_capabilities()
     elif req_type == 'GetMap':
-        return _get_map(args, db)
+        _bad = _wms_params_error(args)
+        if _bad:
+            return Response(_bad, status_code=400, media_type="text/plain; charset=utf-8")
+        # [v20.13] запрос к PostGIS, rasterio и кодирование PNG — в threadpool
+        return await run_in_threadpool(_get_map, args, db)
     return Response("Unknown Request", status_code=400)
 
 
@@ -2764,7 +2806,7 @@ def _get_map(args: dict, db: Session):
 
         pil_img = Image.fromarray(np.moveaxis(canvas, 0, -1), 'RGBA')
         img_io = io.BytesIO()
-        pil_img.save(img_io, 'PNG', optimize=True, compress_level=6)
+        pil_img.save(img_io, 'PNG', optimize=False, compress_level=6)  # optimize=True ×2-3 CPU без выигрыша для тайла
         img_io.seek(0)
         return Response(
             img_io.read(),
@@ -2861,7 +2903,7 @@ async def api_zones_boundaries(request: Request):
 
 _cb_cache_body: bytes = b""
 _cb_cache_etag: str   = ""
-_cb_lock = threading.Lock()
+_cb_lock = _asyncio.Lock()  # [v20.13] был threading.Lock поперёк await — второй запрос намертво вешал event loop
 
 
 def _build_country_boundary() -> bytes:
@@ -2921,7 +2963,7 @@ async def api_country_boundary(request: Request):
     global _cb_cache_body, _cb_cache_etag
 
     if not _cb_cache_body:
-        with _cb_lock:
+        async with _cb_lock:
             if not _cb_cache_body:
                 try:
                     _cb_cache_body = await run_in_threadpool(_build_country_boundary)
@@ -3303,11 +3345,42 @@ async def geoserver_wms_proxy(request: Request):
             fut.set_result(result)
 
 
+_WMS_MAX_SIDE = int(os.getenv("WMS_MAX_SIDE", "1024"))
+
+
+def _wms_params_error(params: dict):
+    """Проверяет WIDTH/HEIGHT/BBOX GetMap-запроса. Возвращает текст ошибки или None."""
+    lower = {k.lower(): v for k, v in params.items()}
+    if lower.get("request", "").upper() not in ("GETMAP", "GETFEATUREINFO", ""):
+        return None  # GetCapabilities/GetLegendGraphic — размеров нет
+    for name in ("width", "height"):
+        raw = lower.get(name)
+        if raw is None:
+            continue
+        try:
+            v = int(raw)
+        except ValueError:
+            return f"Некорректный {name.upper()}"
+        if not 1 <= v <= _WMS_MAX_SIDE:
+            return f"{name.upper()} вне диапазона 1..{_WMS_MAX_SIDE}"
+    bbox = lower.get("bbox")
+    if bbox is not None:
+        try:
+            parts = [float(x) for x in bbox.split(",")]
+        except ValueError:
+            return "Некорректный BBOX"
+        if len(parts) != 4 or not all(math.isfinite(x) for x in parts):
+            return "Некорректный BBOX"
+        if parts[0] >= parts[2] or parts[1] >= parts[3]:
+            return "Некорректный BBOX"
+    return None
+
+
 async def _geoserver_wms_proxy_impl(request: Request):
     target = request.query_params.get("_target", "GEOSERVER")
     base_urls = {
-        "GEOSERVER":     "http://192.168.12.109:9090/geoserver/wms",
-        "GEOSERVER_EXT": "http://192.168.12.109:9090/geoserver/External/wms",
+        "GEOSERVER":     GEOSERVER_BASE_URL + "/wms",
+        "GEOSERVER_EXT": GEOSERVER_BASE_URL + "/External/wms",
         "BELGOSLES":     "https://bank.belgosles.by/geoserver/BelGosLes/wms",
         "COVERSTYLE":    "https://bank.belgosles.by/geoserver/CoverStyleManage/wms",
     }
@@ -3318,6 +3391,13 @@ async def _geoserver_wms_proxy_impl(request: Request):
     # семафора/таймаута и НЕ пробрасывается в GeoServer.
     _kind_hint = request.query_params.get("_kind", "")
     params = {k: v for k, v in request.query_params.items() if k not in ("_target", "_kind")}
+
+    # [v20.13] Границы на размеры и BBOX: иначе WIDTH=20000 раздувает маску ЛУ до
+    # сотен МБ, а случайные значения забивают кэш уникальными ключами.
+    _bad = _wms_params_error(params)
+    if _bad:
+        return Response(_bad, status_code=400, media_type="text/plain; charset=utf-8",
+                        headers=_pk.no_store())
 
     # Определяем тип слоя: ЛУ-маска, bounds-контур или COG-снимок
     _wms_layers = params.get('LAYERS', params.get('layers', ''))
@@ -3351,7 +3431,7 @@ async def _geoserver_wms_proxy_impl(request: Request):
 
     # 1. Python in-memory / Redis кэш — мгновенный ответ без семафора
     if not _is_feature_info:
-        cached = _tile_cache_get(cache_key)
+        cached = await _tile_cache_aget(cache_key)
         if cached:
             content, ct = cached
             return _tile_ok_response(request, content, ct, _resp_headers)
@@ -3411,7 +3491,7 @@ async def _geoserver_wms_proxy_impl(request: Request):
     async with _semaphore:
         # Повторная проверка кэша внутри семафора (другой воркер мог уже заполнить)
         if not _is_feature_info:
-            cached = _tile_cache_get(cache_key)
+            cached = await _tile_cache_aget(cache_key)
             if cached:
                 content, ct = cached
                 return _tile_ok_response(request, content, ct, _resp_headers)
@@ -3470,9 +3550,12 @@ async def _geoserver_wms_proxy_impl(request: Request):
                     # закэширует этот пустой тайл на неделю. При 504 сработает
                     # "any 0" (не кэшируется) + proxy_cache_use_stale отдаст
                     # старый валидный тайл из кэша, если он есть.
-                    return Response(_EMPTY_PNG, status_code=504, media_type="image/png", headers=_resp_headers)
+                    return Response(_EMPTY_PNG, status_code=504, media_type="image/png", headers=_pk.no_store(_resp_headers))
                 if resp.status_code == 429:
-                    retry_after = int(resp.headers.get("Retry-After", 1 + _attempt))
+                    try:
+                        retry_after = min(3, max(0, int(resp.headers.get("Retry-After", 1 + _attempt))))
+                    except ValueError:  # Retry-After в формате HTTP-даты
+                        retry_after = 1 + _attempt
                     logger.warning(f"geoserver_wms_proxy: 429 от GeoServer, ждём {retry_after}s (попытка {_attempt+1}/{_max_attempts})")
                     await _asyncio.sleep(retry_after)
                     continue
@@ -3514,15 +3597,16 @@ async def _geoserver_wms_proxy_impl(request: Request):
                 logger.warning("geoserver_wms_proxy: GeoServer вернул 429 после 3 попыток, отдаём пустой тайл")
                 # FIX: было media_type=..., без status_code → уходило как 200
                 # и nginx кэшировал пустой тайл на 168ч. 503 не кэшируется.
-                return Response(_EMPTY_PNG, status_code=503, media_type="image/png", headers=_resp_headers)
+                return Response(_EMPTY_PNG, status_code=503, media_type="image/png", headers=_pk.no_store(_resp_headers))
 
+            # [v20.13] Ошибка апстрима не должна кэшироваться на сутки
             return Response(content, status_code=resp.status_code,
-                            media_type=ct, headers=_resp_headers)
+                            media_type=ct, headers=_pk.no_store(_resp_headers))
         except Exception as e:
             logger.warning(f"geoserver_wms_proxy: {e}")
             # FIX: тот же баг — любая иная ошибка (разрыв соединения, парсинг
             # и т.п.) отдавалась как 200 и намертво кэшировалась nginx-ом.
-            return Response(_EMPTY_PNG, status_code=502, media_type="image/png", headers=_resp_headers)
+            return Response(_EMPTY_PNG, status_code=502, media_type="image/png", headers=_pk.no_store(_resp_headers))
 
 
 # ============================================================
@@ -3540,6 +3624,23 @@ async def _geoserver_wms_proxy_impl(request: Request):
 #     headers:{'Content-Type':'application/json'},
 #     body: JSON.stringify({layers: activeLayerNames})})
 # ============================================================
+# [v20.13] Фоновые задачи держим в множестве: asyncio хранит только слабую ссылку,
+# и задача могла быть собрана GC до выполнения.
+_bg_tasks: set = set()
+
+
+def _spawn_bg(coro):
+    t = _asyncio.ensure_future(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
+
+# Один и тот же слой/зум прогреваем не чаще раза в 10 минут: фронтенд шлёт seed
+# при каждом включении слоя каждым пользователем — 100 пользователей = 100 × 320 запросов к GeoServer.
+_seed_recent = _pk.TTLCache(maxsize=2000, ttl=600.0)
+
+
 @app.post("/api/wms/seed")
 async def api_wms_seed(request: Request):
     """
@@ -3575,7 +3676,7 @@ async def api_wms_seed(request: Request):
     if not layers or not zooms:
         return {"ok": True, "queued": 0}
 
-    gs_ext_url = "http://192.168.12.109:9090/geoserver/External/wms"
+    gs_ext_url = GEOSERVER_BASE_URL + "/External/wms"
 
     async def _seed_one(layer_name: str, zoom: int, bbox: list):
         """Запрашивает один тайл для прогрева кэша GeoServer + LRU."""
@@ -3595,7 +3696,7 @@ async def api_wms_seed(request: Request):
             f"{k}={_sq(_suq(str(v)), safe='')}" for k, v in sorted(params.items())
         )
         # Пропускаем если уже в кэше
-        if _tile_cache_get(_cache_key):
+        if await _tile_cache_aget(_cache_key):
             return
 
         # bounds — быстрый семафор; cog — медленный
@@ -3603,7 +3704,7 @@ async def api_wms_seed(request: Request):
         _sem = _gs_bounds_semaphore if _is_bounds_layer else _gs_cog_semaphore
 
         async with _sem:
-            if _tile_cache_get(_cache_key):
+            if await _tile_cache_aget(_cache_key):
                 return
             try:
                 _p = params.copy()
@@ -3637,8 +3738,14 @@ async def api_wms_seed(request: Request):
         tasks = []
         for layer_name in layers:
             for zoom in zooms:
+                _seed_key = (layer_name, zoom)
+                if _seed_recent.get(_seed_key):
+                    continue
+                _seed_recent.put(_seed_key, True)
                 bbox = _tile_bbox_for_zoom(zoom, raw_bbox)
                 tasks.append(_seed_one(layer_name, zoom, bbox))
+        if not tasks:
+            return
         # Запускаем все задачи параллельно батчами по 32 чтобы не перегружать event loop
         _BATCH = 32
         for i in range(0, len(tasks), _BATCH):
@@ -3646,7 +3753,7 @@ async def api_wms_seed(request: Request):
         logger.info(f"[seed] завершён прогрев {len(layers)} слоёв × {len(zooms)} зумов")
 
     # Fire-and-forget: ответ сразу, прогрев идёт в фоне
-    _asyncio.create_task(_run_seed())
+    _spawn_bg(_run_seed())
 
     return {"ok": True, "queued": len(layers) * len(zooms), "layers": len(layers), "zooms": zooms}
 
@@ -3905,7 +4012,7 @@ async def api_admin_tokens_issue(
 
 
 @app.post("/api/admin/tokens/{token_id}/revoke")
-async def api_admin_tokens_revoke(
+def api_admin_tokens_revoke(
     token_id: int,
     _=Depends(require_admin),
 ):
@@ -3916,7 +4023,7 @@ async def api_admin_tokens_revoke(
 
 
 @app.get("/api/tokens/my")
-async def api_tokens_my(request: Request):
+def api_tokens_my(request: Request):
     ip = get_real_ip(request)
     token_auto_deactivate_expired()
     tokens = token_get_by_ip(ip)
@@ -4616,7 +4723,7 @@ def _me_fetch_cached(date, time_from='00:00', time_to='23:59', satellite=None, t
     return data, sc
 
 # ══ GEOSERVER PROXIES ═══════════════════════════════════════════════
-_GS_BASE = 'http://192.168.12.109:9090/geoserver'
+_GS_BASE = GEOSERVER_BASE_URL
 _GS_PREFIX = '/geoserver-proxy'
 _gs_session = requests.Session()
 # [SEC v16] Логин/пароль GeoServer были зашиты в код (admin/geoserver — пароль
@@ -4630,7 +4737,7 @@ if not _GS_PASSWORD:
 _gs_session.auth = (_GS_USER, _GS_PASSWORD)
 _gs_session.verify = os.getenv('GEOSERVER_VERIFY_TLS', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 GEOSERVER_WMS_URL = "http://192.168.12.109:8081/geoserver/wms"
-GEOSERVER_WFS_URL = os.getenv("GEOSERVER_WFS_URL", "http://192.168.12.109:9090/geoserver/wfs")
+GEOSERVER_WFS_URL = os.getenv("GEOSERVER_WFS_URL", GEOSERVER_BASE_URL + "/wfs")
 _TILE_PROXY_ALLOWED_HOSTS = {
     '192.168.12.109','93.84.108.142','bank.belgosles.by',
     'tile.openstreetmap.org','a.tile.openstreetmap.org','b.tile.openstreetmap.org','c.tile.openstreetmap.org',
@@ -4744,7 +4851,7 @@ async def _geocoder_warmup():
     threading.Thread(target=_warm, daemon=True, name="geocoder-warmup").start()
 
 @app.get("/health")
-async def health():
+def health():
     # no-store: используется индикатором соединения (static/net-status.js) —
     # ответ не должен браться из кэша браузера/nginx/Service Worker.
     # [v18 PERF] no-cache вместо no-store: ответ всё так же не берётся из кэша без проверки,
@@ -4754,7 +4861,7 @@ async def health():
 
 
 @app.get("/sw.js", include_in_schema=False)
-async def service_worker():
+def service_worker():
     """Service Worker должен отдаваться из корня, чтобы его scope был '/'."""
     path = os.path.join(_STATIC_DIR, "sw.js")
     if not os.path.exists(path):
@@ -4949,7 +5056,7 @@ async def api_news_img(u: str = Query(..., min_length=10, max_length=2048)):
         "X-Content-Type-Options": "nosniff"})
 
 @app.get("/uploads/{filename:path}")
-async def uploaded_file(request: Request, filename: str):
+def uploaded_file(request: Request, filename: str):
     # [SEC v16] Было os.path.join(UPLOAD_FOLDER, filename): «/uploads//etc/passwd»,
     # «/uploads/C:/Windows/win.ini» или «%2F..» отдавали ЛЮБОЙ файл сервера.
     p = _sh.safe_join(UPLOAD_FOLDER, filename)
@@ -5859,7 +5966,7 @@ async def get_raster_tile(z: int, x: int, y: int, request: Request):
 
 
 @app.post("/api/admin/reset-tile-cache")
-async def reset_tile_cache(_=Depends(require_admin)):
+def reset_tile_cache(_=Depends(require_admin)):
     """Сбрасывает дисковый кэш растровых тайлов."""
     _invalidate_raster_tile_cache()
     return {"ok": True, "message": "Дисковый кэш тайлов сброшен"}
@@ -6229,7 +6336,7 @@ async def proxy_dzz_tile(request: Request, z: int, y: int, x: int):
     if not (0 <= z <= 22 and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
         return _dzz_empty()
     key = f"dzz:{z}/{y}/{x}"
-    hit = _tile_cache_get(key)
+    hit = await _tile_cache_aget(key)
     if hit:
         return _tile_ok_response(request, hit[0], hit[1], _DZZ_TILE_HEADERS)
     fut = _dzz_inflight.get(key)
@@ -6300,7 +6407,7 @@ async def geoserver_pbf_proxy(request: Request, layer: str, z: int, x: int, y: i
     if not (0 <= z <= 22 and 0 <= x < (1 << z) and 0 <= y < (1 << z)) or len(layer) > 200:
         return Response(status_code=400)
     key = f"pbf:{layer}:{z}/{x}/{y}"
-    hit = _tile_cache_get(key)
+    hit = await _tile_cache_aget(key)
     if hit:
         return _tile_ok_response(request, hit[0], hit[1], _TILE_RESPONSE_HEADERS)
     try:
@@ -6424,7 +6531,7 @@ async def geoserver_web_proxy(path: str, request: Request, _admin=Depends(requir
     return Response(body_out,status_code=gs_resp.status_code,headers=out_h,media_type=ct)
 
 @app.get("/api/download_cog")
-async def api_download_cog(request: Request, layer: str=Query(...), _=Depends(require_admin)):
+def api_download_cog(request: Request, layer: str=Query(...), _=Depends(require_admin)):
     """Прямое скачивание COG-файла администратором (без токена)."""
     file_path, display_filename = _resolve_cog_path(layer)
     if not file_path:
@@ -6434,7 +6541,7 @@ async def api_download_cog(request: Request, layer: str=Query(...), _=Depends(re
     return _stream_file_response(file_path, filename, request)
 
 @app.get("/api/dzz/download")
-async def api_dzz_download(request: Request, layer: str = Query(...),
+def api_dzz_download(request: Request, layer: str = Query(...),
                             token: Optional[str] = Query(None),
                             db: Session = Depends(get_db)):
     ip = get_real_ip(request)
@@ -6499,7 +6606,7 @@ async def api_download_token(request: Request):
     return {"token": token}
 
 @app.get("/api/download_file")
-async def api_download_file_v2(request: Request, token: str = Query(...)):
+def api_download_file_v2(request: Request, token: str = Query(...)):
     _dl_cleanup2()
     with _dl_lock2:
         entry = _dl_tokens2.get(token)
@@ -6527,7 +6634,7 @@ async def api_download_file_v2(request: Request, token: str = Query(...)):
 
 # ── USERS ──────────────────────────────────────────────────
 @app.get("/api/users/me")
-async def api_user_me(request: Request):
+def api_user_me(request: Request):
     ip      = get_real_ip(request)
     device_id = get_device_id(request)
     user_id = get_current_user(request)
@@ -6583,7 +6690,7 @@ async def api_users_update(uid: int, request: Request, _=Depends(require_admin))
     return {"ok": True}
 
 @app.get("/api/users/history")
-async def api_users_history(_=Depends(require_admin)): return get_login_history(5000)
+def api_users_history(_=Depends(require_admin)): return get_login_history(5000)
 
 @app.post("/api/admin/history/cleanup")
 def api_history_cleanup(_=Depends(require_admin)):
@@ -6619,7 +6726,7 @@ def api_users_freeze(uid: int, _=Depends(require_admin)):
     set_status(uid, "frozen"); return {"ok": True}
 
 @app.post("/api/users/unfreeze/{uid}")
-async def api_users_unfreeze(uid: int, _=Depends(require_admin)):
+def api_users_unfreeze(uid: int, _=Depends(require_admin)):
     set_status(uid, "active"); return {"ok": True}
 
 @app.post("/api/users/delete/{uid}")
@@ -6634,14 +6741,14 @@ def api_users_delete(uid: int, _=Depends(require_admin)):
     set_status(uid, "banned"); return {"ok": True}
 
 @app.get("/api/users/pending")
-async def api_users_pending(_=Depends(require_admin)): return get_pending_requests()
+def api_users_pending(_=Depends(require_admin)): return get_pending_requests()
 
 @app.post("/api/users/approve/{req_id}")
 async def api_users_approve(req_id: int, _=Depends(require_admin)):
     approve_request(req_id); return {"ok":True}
 
 @app.post("/api/users/reject/{req_id}")
-async def api_users_reject(req_id: int, _=Depends(require_admin)):
+def api_users_reject(req_id: int, _=Depends(require_admin)):
     reject_request(req_id); return {"ok":True}
 
 @app.post("/api/users/submit_form")
@@ -6657,7 +6764,7 @@ async def api_submit_user_form(request: Request):
     return {"ok":True,"message":"Заявка отправлена. Ожидайте подтверждения администратора."}
 
 @app.get("/api/users/can_download")
-async def api_can_download(request: Request):
+def api_can_download(request: Request):
     ip=get_real_ip(request); device_id=get_device_id(request)
     info=get_user_info_by_ip(ip, device_id)
     return {"can_download":bool(info and info.get("user_name") and info.get("org_name"))}
@@ -6713,7 +6820,7 @@ async def api_session_submit_profile(request: Request):
     return {"ok":True,"message":"Заявка отправлена. Ожидайте подтверждения."}
 
 @app.get("/api/session/check")
-async def api_session_check(request: Request):
+def api_session_check(request: Request):
     ip=get_real_ip(request); device_id=get_device_id(request)
     _,status=get_status_by_ip(ip, device_id); return {"status":status or "active"}
 
@@ -9475,20 +9582,20 @@ def delete_feature(
 
 # ── MAINTENANCE ────────────────────────────────────────────
 @app.post("/api/maintenance/on")
-async def api_maintenance_on(_=Depends(require_admin)):
+def api_maintenance_on(_=Depends(require_admin)):
     with _maintenance_lock:
         _maintenance["active"]=True; _maintenance["since"]=datetime.now().strftime("%H:%M, %d.%m.%Y"); _maintenance["blocked_visits"]=0
     return {"ok":True,"active":True,"since":_maintenance["since"]}
 
 @app.post("/api/maintenance/off")
-async def api_maintenance_off(_=Depends(require_admin)):
+def api_maintenance_off(_=Depends(require_admin)):
     with _maintenance_lock: _maintenance.update({"active":False,"since":None,"blocked_visits":0})
     return {"ok":True,"active":False}
 
 import time
 
 @app.get("/api/maintenance/status")
-async def api_maintenance_status(_=Depends(require_admin)): return _maintenance.copy()
+def api_maintenance_status(_=Depends(require_admin)): return _maintenance.copy()
 
 @app.get("/maintenance", response_class=HTMLResponse)
 async def maintenance_page(request: Request):
@@ -9497,7 +9604,7 @@ async def maintenance_page(request: Request):
 # ── ADMIN PAGES ────────────────────────────────────────────
 @app.get("/admin/users", response_class=HTMLResponse)
 @app.get("/admin_users",  response_class=HTMLResponse)
-async def admin_users_page(request: Request, _=Depends(require_admin)):
+def admin_users_page(request: Request, _=Depends(require_admin)):
     # csrf_token — для <meta name="csrf-token">: им подписываются POST из консоли (напр. сезон оформления)
     _csrf = get_csrf_token(request)
     _resp = templates.TemplateResponse(request=request,name="admin_users.html",
@@ -9507,18 +9614,18 @@ async def admin_users_page(request: Request, _=Depends(require_admin)):
     return _inject_season_card(_resp, _csrf)
 
 @app.get("/frozen", response_class=HTMLResponse)
-async def frozen_page(request: Request):
+def frozen_page(request: Request):
     ip=get_real_ip(request)
     return templates.TemplateResponse(request=request,name="frozen.html",context={"ip":ip},status_code=403)
 
 @app.get("/banned", response_class=HTMLResponse)
-async def banned_page(request: Request):
+def banned_page(request: Request):
     ip=get_real_ip(request)
     return templates.TemplateResponse(request=request,name="blacklisted.html",context={"ip":ip},status_code=403)
 
 # ── TOKENS ADMIN ───────────────────────────────────────────
 @app.get("/api/admin/tokens")
-async def api_admin_tokens_list(_=Depends(require_admin)):
+def api_admin_tokens_list(_=Depends(require_admin)):
     token_auto_deactivate_expired(); return token_get_all()
 
 @app.post("/api/admin/users/quota_unlimited")
