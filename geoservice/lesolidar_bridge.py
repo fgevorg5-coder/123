@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 try:                                   # пакетом (tests) или рядом с app.py
     from . import jobkit as _jk        # type: ignore
@@ -992,6 +993,7 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
     engine = Engine(base_dir)
     store = Store(root, engine, logger)
     max_upload = int(_env_float("LESOLIDAR_MAX_UPLOAD_GB", 20) * 1024 * MB)
+    max_queue = int(_env_float("LESOLIDAR_MAX_QUEUE", 12))
     r = APIRouter(prefix="/api/lesolidar", tags=["lesolidar"])
     r.store = store  # для тестов
     r.engine = engine
@@ -1035,29 +1037,32 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
     async def upload_init(request: Request):
         mutate(request)
         body = await request.json()
-        name = _safe_name(body.get("name"))
-        size = int(body.get("size") or 0)
-        if not re.search(r"\.(las|laz)$", name, re.I):
-            raise HTTPException(422, "Нужен файл .las или .laz")
-        if size <= 375:
-            raise HTTPException(422, "Файл пуст или слишком мал")
-        if size > max_upload:
-            raise HTTPException(413, f"Файл больше {max_upload // (1024 * MB)} ГБ (LESOLIDAR_MAX_UPLOAD_GB)")
-        free = shutil.disk_usage(root).free
-        if free < size * 1.3 + 2 * 1024 * MB:
-            raise HTTPException(507, f"Мало места на диске сервера: свободно {free / 1024 ** 3:.1f} ГБ")
-        key = f"{name}|{size}|{body.get('last_modified') or ''}"
-        for d in (root / "uploads").iterdir():  # докачка того же файла
-            m = _read_json(d / "meta.json")
-            if m and m.get("key") == key and (d / "data.part").exists():
-                m["received"] = (d / "data.part").stat().st_size
-                return {"upload_id": m["id"], "chunk_bytes": CHUNK, "received": m["received"], "resumed": True}
-        uid = uuid.uuid4().hex[:16]
-        d = root / "uploads" / uid
-        d.mkdir(parents=True)
-        (d / "data.part").write_bytes(b"")
-        _atomic_json(d / "meta.json", {"id": uid, "key": key, "name": name, "size": size, "created": _now()})
-        return {"upload_id": uid, "chunk_bytes": CHUNK, "received": 0, "resumed": False}
+        def _init():
+            name = _safe_name(body.get("name"))
+            size = int(body.get("size") or 0)
+            if not re.search(r"\.(las|laz)$", name, re.I):
+                raise HTTPException(422, "Нужен файл .las или .laz")
+            if size <= 375:
+                raise HTTPException(422, "Файл пуст или слишком мал")
+            if size > max_upload:
+                raise HTTPException(413, f"Файл больше {max_upload // (1024 * MB)} ГБ (LESOLIDAR_MAX_UPLOAD_GB)")
+            free = shutil.disk_usage(root).free
+            if free < size * 1.3 + 2 * 1024 * MB:
+                raise HTTPException(507, f"Мало места на диске сервера: свободно {free / 1024 ** 3:.1f} ГБ")
+            key = f"{name}|{size}|{body.get('last_modified') or ''}"
+            for d in (root / "uploads").iterdir():  # докачка того же файла
+                m = _read_json(d / "meta.json")
+                if m and m.get("key") == key and (d / "data.part").exists():
+                    m["received"] = (d / "data.part").stat().st_size
+                    return {"upload_id": m["id"], "chunk_bytes": CHUNK, "received": m["received"], "resumed": True}
+            uid = uuid.uuid4().hex[:16]
+            d = root / "uploads" / uid
+            d.mkdir(parents=True)
+            (d / "data.part").write_bytes(b"")
+            _atomic_json(d / "meta.json", {"id": uid, "key": key, "name": name, "size": size, "created": _now()})
+            return {"upload_id": uid, "chunk_bytes": CHUNK, "received": 0, "resumed": False}
+
+        return await run_in_threadpool(_init)
 
     @r.get("/upload/{uid}")
     def upload_state(uid: str, request: Request):
@@ -1080,16 +1085,19 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
         if offset > have:
             raise HTTPException(409, f"Пропуск данных: сервер получил {have} байт")
         written = 0
-        with open(part, "r+b") as f:
-            f.seek(offset)
+        f = await run_in_threadpool(open, part, "r+b")
+        try:
+            await run_in_threadpool(f.seek, offset)
             async for chunk in request.stream():
                 written += len(chunk)
                 if written > CHUNK + MB or offset + written > m["size"]:
                     raise HTTPException(413, "Кусок больше допустимого")
-                f.write(chunk)
+                await run_in_threadpool(f.write, chunk)
+        finally:
+            await run_in_threadpool(f.close)
         if written and _now() - float(m.get("updated") or 0) > 60:
             m["updated"] = _now()
-            _atomic_json(d / "meta.json", m)
+            await run_in_threadpool(_atomic_json, d / "meta.json", m)
         return {"received": max(have, offset + written)}  # повтор куска не уменьшает длину
 
     @r.delete("/upload/{uid}")
@@ -1219,33 +1227,36 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
             data += chunk
             if len(data) > 25 * MB:
                 raise HTTPException(413, "Файл границы больше 25 МБ")
-        bid = uuid.uuid4().hex[:16]
-        bd = root / "boundaries" / bid
-        bd.mkdir(parents=True)
-        path = bd / name
-        if ext == "zip":
-            try:
-                with zipfile.ZipFile(io.BytesIO(bytes(data))) as z:
-                    shp = None
-                    for info in z.infolist():
-                        base = _safe_name(info.filename)
-                        if not re.search(r"\.(shp|shx|dbf|prj|cpg)$", base, re.I) or info.file_size > 200 * MB:
-                            continue
-                        (bd / base).write_bytes(z.read(info))
-                        if base.lower().endswith(".shp"):
-                            shp = bd / base
-            except zipfile.BadZipFile:
-                shutil.rmtree(bd, ignore_errors=True)
-                raise HTTPException(422, "Повреждённый ZIP")
-            if not shp:
-                shutil.rmtree(bd, ignore_errors=True)
-                raise HTTPException(422, "В ZIP нет .shp")
-            path = shp
-        else:
-            path.write_bytes(bytes(data))
-        meta = {"id": bid, "name": name, "path": str(path), "created": _now()}
-        _atomic_json(bd / "meta.json", meta)
-        return {"id": bid, "name": name}
+        def _save():
+            bid = uuid.uuid4().hex[:16]
+            bd = root / "boundaries" / bid
+            bd.mkdir(parents=True)
+            path = bd / name
+            if ext == "zip":
+                try:
+                    with zipfile.ZipFile(io.BytesIO(bytes(data))) as z:
+                        shp = None
+                        for info in z.infolist():
+                            base = _safe_name(info.filename)
+                            if not re.search(r"\.(shp|shx|dbf|prj|cpg)$", base, re.I) or info.file_size > 200 * MB:
+                                continue
+                            (bd / base).write_bytes(z.read(info))
+                            if base.lower().endswith(".shp"):
+                                shp = bd / base
+                except zipfile.BadZipFile:
+                    shutil.rmtree(bd, ignore_errors=True)
+                    raise HTTPException(422, "Повреждённый ZIP")
+                if not shp:
+                    shutil.rmtree(bd, ignore_errors=True)
+                    raise HTTPException(422, "В ZIP нет .shp")
+                path = shp
+            else:
+                path.write_bytes(bytes(data))
+            meta = {"id": bid, "name": name, "path": str(path), "created": _now()}
+            _atomic_json(bd / "meta.json", meta)
+            return {"id": bid, "name": name}
+
+        return await run_in_threadpool(_save)
 
     # ── демо-участок: синтетическое облако LesoLidar (команда synth) в центре территории ──
     @r.post("/demo")
@@ -1277,7 +1288,6 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
                                                  "--seed", str(seed)]), cwd=str(fd), timeout=900, **kw)
             return res.returncode, _decode(res.stdout or b"")
 
-        from starlette.concurrency import run_in_threadpool
         try:
             rc, text = await run_in_threadpool(make)
         except subprocess.TimeoutExpired:
@@ -1313,57 +1323,63 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
         if not engine.kind:
             raise HTTPException(503, "; ".join(engine.problems()) or "Обработчик не настроен")
         body = await request.json()
-        fid = _check_id(str(body.get("file_id") or ""), "файл")
-        fm = store.file_meta(fid)
-        params = clean_params(body.get("params") or {}, engine)
-        info = fm.get("info") or {}
-        if not params.get("epsg") and not (info.get("epsg") or info.get("crs")):
-            raise HTTPException(422, "В файле нет системы координат — укажите EPSG")
-        jid = uuid.uuid4().hex[:16]
-        jd = root / "jobs" / jid
-        jd.mkdir(parents=True)
-        b = body.get("boundary") or {}
-        kind = b.get("kind") or "none"
-        bpath = None
-        label = str(b.get("label") or "")[:120]
-        if kind in ("scene", "geojson", "roles") and isinstance(b.get("geojson"), dict):
-            if kind == "scene":
-                gj = scene_boundary(b["geojson"], fm.get("bbox_ll"))
-            elif kind == "roles":
-                gj = compose_boundary(b["geojson"], fm.get("bbox_ll"))
-            else:
-                gj = b["geojson"]
-            if gj:
-                bpath = jd / "boundary.geojson"
-                bpath.write_text(json.dumps(gj, ensure_ascii=False), encoding="utf-8")
-            else:
-                label = (label + " — облако целиком внутри").strip(" —")
-        elif kind == "upload":
-            bm = _read_json(store.bdir(_check_id(str(b.get("id") or ""), "граница")) / "meta.json")
-            if not bm:
-                raise HTTPException(404, "Файл границы не найден")
-            bpath = Path(bm["path"])
-            label = label or bm["name"]
-        lp = dict(params)
-        lp.update({"las_path": str(store.fdir(fid) / fm["stored_name"]), "out_dir": str(jd / "out"),
-                   "boundary_path": str(bpath) if bpath else ""})
-        (jd / "params.json").write_text(json.dumps(lp, ensure_ascii=False, indent=1), encoding="utf-8")
-        versions = [j for j in store.jobs() if j.get("file_id") == fid]
-        scene = body.get("scene") if isinstance(body.get("scene"), dict) else {}
-        j = {
-            "id": jid, "file_id": fid, "file_name": fm["name"], "name": str(body.get("name") or fm["name"])[:120],
-            "created": _now(), "status": "queued", "progress": 0, "stage": "В очереди", "stage_index": -1,
-            "params": params, "boundary": {"kind": kind if (bpath or kind == "none") else "none", "label": label},
-            "boundary_path": str(bpath) if bpath else None, "version": len(versions) + 1,
-            "polygons": [{"role": str(r.get("role") or "")[:12], "name": str(r.get("name") or "")[:80],
-                          "area_ha": r.get("area_ha") if isinstance(r.get("area_ha"), (int, float)) else None}
-                         for r in (b.get("polygons") or [])[:50] if isinstance(r, dict)],
-            "parent": body.get("parent") if isinstance(body.get("parent"), str) and ID_RE.match(body.get("parent") or "") else None,
-            "scene": {"code": str(scene.get("code") or "")[:40], "name": str(scene.get("name") or "")[:160]},
-            "bbox_ll": fm.get("bbox_ll"), "author": "admin", "eta_s": None, "meta": clean_meta(body.get("meta")),
-        }
-        store.enqueue(j)
-        return public_job(j)
+        def _create():
+            active = sum(1 for x in store.jobs() if x.get("status") in ("queued", "running"))
+            if active >= max_queue:
+                raise HTTPException(429, f"Очередь ЛесоЛидар заполнена ({active} заданий) — дождитесь завершения текущих")
+            fid = _check_id(str(body.get("file_id") or ""), "файл")
+            fm = store.file_meta(fid)
+            params = clean_params(body.get("params") or {}, engine)
+            info = fm.get("info") or {}
+            if not params.get("epsg") and not (info.get("epsg") or info.get("crs")):
+                raise HTTPException(422, "В файле нет системы координат — укажите EPSG")
+            jid = uuid.uuid4().hex[:16]
+            jd = root / "jobs" / jid
+            jd.mkdir(parents=True)
+            b = body.get("boundary") or {}
+            kind = b.get("kind") or "none"
+            bpath = None
+            label = str(b.get("label") or "")[:120]
+            if kind in ("scene", "geojson", "roles") and isinstance(b.get("geojson"), dict):
+                if kind == "scene":
+                    gj = scene_boundary(b["geojson"], fm.get("bbox_ll"))
+                elif kind == "roles":
+                    gj = compose_boundary(b["geojson"], fm.get("bbox_ll"))
+                else:
+                    gj = b["geojson"]
+                if gj:
+                    bpath = jd / "boundary.geojson"
+                    bpath.write_text(json.dumps(gj, ensure_ascii=False), encoding="utf-8")
+                else:
+                    label = (label + " — облако целиком внутри").strip(" —")
+            elif kind == "upload":
+                bm = _read_json(store.bdir(_check_id(str(b.get("id") or ""), "граница")) / "meta.json")
+                if not bm:
+                    raise HTTPException(404, "Файл границы не найден")
+                bpath = Path(bm["path"])
+                label = label or bm["name"]
+            lp = dict(params)
+            lp.update({"las_path": str(store.fdir(fid) / fm["stored_name"]), "out_dir": str(jd / "out"),
+                       "boundary_path": str(bpath) if bpath else ""})
+            (jd / "params.json").write_text(json.dumps(lp, ensure_ascii=False, indent=1), encoding="utf-8")
+            versions = [j for j in store.jobs() if j.get("file_id") == fid]
+            scene = body.get("scene") if isinstance(body.get("scene"), dict) else {}
+            j = {
+                "id": jid, "file_id": fid, "file_name": fm["name"], "name": str(body.get("name") or fm["name"])[:120],
+                "created": _now(), "status": "queued", "progress": 0, "stage": "В очереди", "stage_index": -1,
+                "params": params, "boundary": {"kind": kind if (bpath or kind == "none") else "none", "label": label},
+                "boundary_path": str(bpath) if bpath else None, "version": len(versions) + 1,
+                "polygons": [{"role": str(r.get("role") or "")[:12], "name": str(r.get("name") or "")[:80],
+                              "area_ha": r.get("area_ha") if isinstance(r.get("area_ha"), (int, float)) else None}
+                             for r in (b.get("polygons") or [])[:50] if isinstance(r, dict)],
+                "parent": body.get("parent") if isinstance(body.get("parent"), str) and ID_RE.match(body.get("parent") or "") else None,
+                "scene": {"code": str(scene.get("code") or "")[:40], "name": str(scene.get("name") or "")[:160]},
+                "bbox_ll": fm.get("bbox_ll"), "author": "admin", "eta_s": None, "meta": clean_meta(body.get("meta")),
+            }
+            store.enqueue(j)
+            return public_job(j)
+
+        return await run_in_threadpool(_create)
 
     @r.get("/jobs")
     def jobs(request: Request, file_id: Optional[str] = None, code: Optional[str] = None, bbox: str = "",

@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 try:
     from . import jobkit as _jk        # type: ignore
@@ -354,6 +355,7 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
     max_upload = int(_env_float("GEOREF_MAX_UPLOAD_MB", 1024) * MB)
     max_files = int(_env_float("GEOREF_MAX_FILES", 60))
     max_queue = int(_env_float("GEOREF_MAX_QUEUE", 12))
+    max_per_ip = int(_env_float("GEOREF_MAX_PER_IP", 4))
     r = APIRouter(prefix="/api/georef", tags=["georef"])
     r.store = store
     check_cache: Dict[str, Any] = {"t": 0.0, "v": None}
@@ -459,12 +461,23 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
         if not ow:
             new_tok = secrets.token_hex(16)
             ow = hashlib.sha256(("georef:" + new_tok).encode()).hexdigest()[:24]
-        jobs = store.jobs()
-        active = [j for j in jobs if j.get("status") in ("queued", "running")]
-        if len(active) >= max_queue:
-            raise HTTPException(429, "Очередь заполнена — попробуйте через несколько минут")
-        if not is_admin(request) and sum(1 for j in active if j.get("owner") == ow) >= 2:
-            raise HTTPException(429, "У вас уже два задания в работе — дождитесь их завершения")
+        ip = client_ip(request)
+        admin_req = is_admin(request)
+
+        def limit_error() -> Optional[str]:
+            active = [j for j in store.jobs() if j.get("status") in ("queued", "running")]
+            if len(active) >= max_queue:
+                return "Очередь заполнена — попробуйте через несколько минут"
+            if not admin_req:
+                if sum(1 for j in active if j.get("owner") == ow) >= 2:
+                    return "У вас уже два задания в работе — дождитесь их завершения"
+                if ip and sum(1 for j in active if j.get("ip") == ip) >= max_per_ip:
+                    return "С вашего адреса уже слишком много заданий в работе — дождитесь их завершения"
+            return None
+
+        err = await run_in_threadpool(limit_error)
+        if err:
+            raise HTTPException(429, err)
         ln = int(request.headers.get("content-length") or 0)
         if ln > max_upload + MB:
             raise HTTPException(413, f"Больше {max_upload // MB} МБ за раз")
@@ -489,7 +502,7 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
             raise HTTPException(413, f"Не больше {max_files} файлов за раз")
         jid = uuid.uuid4().hex[:16]
         jd = root / "jobs" / jid
-        (jd / "in").mkdir(parents=True)
+        await run_in_threadpool((jd / "in").mkdir, parents=True)
         total, names, used = 0, [], set()
         try:
             for up in uploads:
@@ -502,7 +515,8 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
                     stem, dot, ext = base.partition(".")
                     name, k = f"{stem}_{k}.{ext}" if dot else f"{base}_{k}", k + 1
                 used.add(name.lower())
-                with open(jd / "in" / name, "wb") as fh:
+                fh = await run_in_threadpool(open, jd / "in" / name, "wb")
+                try:
                     while True:
                         chunk = await up.read(1024 * 1024)
                         if not chunk:
@@ -510,7 +524,9 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
                         total += len(chunk)
                         if total > max_upload:
                             raise HTTPException(413, f"Больше {max_upload // MB} МБ за раз")
-                        fh.write(chunk)
+                        await run_in_threadpool(fh.write, chunk)
+                finally:
+                    await run_in_threadpool(fh.close)
                 names.append({"name": name, "size": (jd / "in" / name).stat().st_size})
             if kind == "georef" and not any(n["name"].lower().endswith(IN_EXT["georef"][:-1]) or n["name"].lower().endswith(".zip") for n in names):
                 raise HTTPException(422, "Нужен скан плана (JPG/PNG/TIFF) или PDF")
@@ -518,7 +534,7 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
             if free < total * 6 + 1024 * MB:
                 raise HTTPException(507, "Мало места на диске сервера")
         except BaseException:
-            shutil.rmtree(jd, ignore_errors=True)
+            await run_in_threadpool(shutil.rmtree, jd, True)
             raise
         finally:
             for up in uploads:
@@ -526,12 +542,26 @@ def build_router(*, base_dir: str, is_admin: Callable[[Request], bool], verify_c
                     await up.close()
                 except Exception:
                     pass
-        _atomic_json(jd / "params.json", params)
         title = str(form.get("title") or "").strip()[:120] or ", ".join(n["name"] for n in names[:3]) + ("…" if len(names) > 3 else "")
         j = {"id": jid, "kind": kind, "title": title, "created": _now(), "status": "queued", "progress": 0,
              "stage": "В очереди", "stage_index": -1, "params": params, "inputs": names, "input_bytes": total,
-             "owner": ow, "ip": client_ip(request), "eta_s": None}
-        store.enqueue(j)
+             "owner": ow, "ip": ip, "eta_s": None}
+
+        def commit() -> Optional[str]:
+            # повторная проверка под локом прямо перед постановкой: загрузка шла долго, лимиты могли быть исчерпаны
+            with store.lock:
+                store._invalidate_jobs()
+                err = limit_error()
+                if err:
+                    shutil.rmtree(jd, ignore_errors=True)
+                    return err
+                _atomic_json(jd / "params.json", params)
+                store.enqueue(j)
+            return None
+
+        err = await run_in_threadpool(commit)
+        if err:
+            raise HTTPException(429, err)
         resp = JSONResponse(public_job(j, request))
         if new_tok:
             secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
